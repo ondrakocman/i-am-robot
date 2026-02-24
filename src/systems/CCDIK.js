@@ -1,76 +1,113 @@
 import * as THREE from 'three'
 
-// ─── CCD (Cyclic Coordinate Descent) IK ──────────────────────────────────────
-// Operates entirely in world space.
-// targetPos MUST be a world-space THREE.Vector3.
-// joints: array of URDF joint objects (from shoulder toward wrist).
-// endEffector: the URDF link whose world position should reach targetPos.
+// ─── CCD IK with Position + Orientation Goals ────────────────────────────────
+// All 7 arm joints participate. Shoulder/elbow prioritize position,
+// wrist joints prioritize orientation. This gives proper hand direction.
+//
+// targetPos:  world-space Vector3 (where the wrist should be)
+// targetQuat: world-space Quaternion (which direction the hand should face)
 
-const _endPos    = new THREE.Vector3()
-const _jointPos  = new THREE.Vector3()
-const _toEnd     = new THREE.Vector3()
-const _toTarget  = new THREE.Vector3()
-const _cross     = new THREE.Vector3()
-const _localAxis = new THREE.Vector3()
-const _parentQ   = new THREE.Quaternion()
+const _endPos     = new THREE.Vector3()
+const _jointPos   = new THREE.Vector3()
+const _toEnd      = new THREE.Vector3()
+const _toTarget   = new THREE.Vector3()
+const _cross      = new THREE.Vector3()
+const _localAxis  = new THREE.Vector3()
+const _parentQ    = new THREE.Quaternion()
+const _endQuat    = new THREE.Quaternion()
+const _deltaQuat  = new THREE.Quaternion()
+const _orientAxis = new THREE.Vector3()
+const _localOAxis = new THREE.Vector3()
 
-export function solveCCDIK(joints, endEffector, targetPos, iterations = 20) {
+export function solveCCDIK(joints, endEffector, targetPos, targetQuat, iterations = 25) {
+  const n = joints.length
   for (let iter = 0; iter < iterations; iter++) {
-    // Check convergence
     endEffector.getWorldPosition(_endPos)
-    if (_endPos.distanceToSquared(targetPos) < 0.0001) return // within 1cm
+    endEffector.getWorldQuaternion(_endQuat)
 
-    for (let i = joints.length - 1; i >= 0; i--) {
+    const posErr = _endPos.distanceTo(targetPos)
+    const oriErr = _endQuat.angleTo(targetQuat)
+    if (posErr < 0.003 && oriErr < 0.03) return
+
+    for (let i = n - 1; i >= 0; i--) {
       const joint = joints[i]
       if (!joint.setJointValue) continue
 
-      // Refresh positions each step (they change as we adjust joints)
+      // Weight: first joints focus on position, last joints on orientation
+      const t = n > 1 ? i / (n - 1) : 0  // 0 = first joint, 1 = last
+      const posW  = 1.0 - t * 0.8         // 1.0 → 0.2
+      const oriW  = t * 0.8               // 0.0 → 0.8
+
+      let totalAngle = 0
+
+      // ── Position contribution ───────────────────────────────────────────
       endEffector.getWorldPosition(_endPos)
       joint.getWorldPosition(_jointPos)
 
       _toEnd.subVectors(_endPos, _jointPos)
       _toTarget.subVectors(targetPos, _jointPos)
+      const lenE = _toEnd.length()
+      const lenT = _toTarget.length()
 
-      const lenEnd = _toEnd.length()
-      const lenTarget = _toTarget.length()
-      if (lenEnd < 1e-6 || lenTarget < 1e-6) continue
+      if (lenE > 1e-6 && lenT > 1e-6) {
+        _toEnd.divideScalar(lenE)
+        _toTarget.divideScalar(lenT)
+        _cross.crossVectors(_toEnd, _toTarget)
+        const sinA = _cross.length()
+        const cosA = _toEnd.dot(_toTarget)
 
-      _toEnd.divideScalar(lenEnd)
-      _toTarget.divideScalar(lenTarget)
+        if (sinA > 1e-6) {
+          _cross.divideScalar(sinA)
+          joint.parent.getWorldQuaternion(_parentQ).invert()
+          _localAxis.copy(_cross).applyQuaternion(_parentQ)
+          const proj = _localAxis.dot(joint.axis)
+          if (Math.abs(proj) > 0.01) {
+            totalAngle += Math.atan2(sinA, cosA) * Math.sign(proj) * posW
+          }
+        }
+      }
 
-      // Desired rotation axis in world space
-      _cross.crossVectors(_toEnd, _toTarget)
-      const sinAngle = _cross.length()
-      const cosAngle = _toEnd.dot(_toTarget)
+      // ── Orientation contribution ────────────────────────────────────────
+      if (oriW > 0.01 && targetQuat) {
+        endEffector.getWorldQuaternion(_endQuat)
+        _deltaQuat.copy(_endQuat).invert().premultiply(targetQuat)
+        _deltaQuat.normalize()
 
-      if (sinAngle < 1e-6) continue
+        // Ensure shortest path
+        if (_deltaQuat.w < 0) {
+          _deltaQuat.x = -_deltaQuat.x
+          _deltaQuat.y = -_deltaQuat.y
+          _deltaQuat.z = -_deltaQuat.z
+          _deltaQuat.w = -_deltaQuat.w
+        }
 
-      _cross.divideScalar(sinAngle)
+        const halfAngle = Math.acos(Math.min(1, _deltaQuat.w))
+        if (halfAngle > 0.005) {
+          const sa = Math.sin(halfAngle)
+          _orientAxis.set(
+            _deltaQuat.x / sa,
+            _deltaQuat.y / sa,
+            _deltaQuat.z / sa
+          ).normalize()
 
-      // Convert world rotation axis to the joint's parent frame
-      // (because joint.axis is defined in its parent's local frame)
-      joint.parent.getWorldQuaternion(_parentQ)
-      _parentQ.invert()
-      _localAxis.copy(_cross).applyQuaternion(_parentQ)
+          joint.parent.getWorldQuaternion(_parentQ).invert()
+          _localOAxis.copy(_orientAxis).applyQuaternion(_parentQ)
+          const proj = _localOAxis.dot(joint.axis)
+          if (Math.abs(proj) > 0.01) {
+            totalAngle += halfAngle * 2 * Math.sign(proj) * oriW
+          }
+        }
+      }
 
-      // Project onto the joint's single rotation axis (revolute joint constraint)
-      const projection = _localAxis.dot(joint.axis)
-      if (Math.abs(projection) < 0.01) continue
+      // Damping
+      totalAngle *= 0.5
 
-      // Compute the angle change along this joint axis
-      let angle = Math.atan2(sinAngle, cosAngle) * Math.sign(projection)
+      if (Math.abs(totalAngle) < 0.0001) continue
 
-      // Damping: reduce step size to prevent oscillation
-      angle *= 0.6
-
-      // Apply
-      const newAngle = (joint.angle || 0) + angle
-      const clamped = clamp(newAngle, joint.limit?.lower ?? -Math.PI, joint.limit?.upper ?? Math.PI)
-      joint.setJointValue(clamped)
+      const newAngle = (joint.angle || 0) + totalAngle
+      const lo = joint.limit?.lower ?? -Math.PI
+      const hi = joint.limit?.upper ?? Math.PI
+      joint.setJointValue(Math.max(lo, Math.min(hi, newAngle)))
     }
   }
-}
-
-function clamp(v, min, max) {
-  return Math.max(min, Math.min(max, v))
 }
