@@ -1,22 +1,16 @@
-import { useEffect, useRef } from 'react'
+import { useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
 import { Scene } from './components/Scene.jsx'
 
-// ─── XR Store ─────────────────────────────────────────────────────────────────
-// Disable built-in hand models — we render Dex 3.1 meshes instead
 const xrStore = createXRStore({
-  hand: {
-    model: false,
-  },
+  hand: { model: false },
   controller: false,
+  foveation: 1,
+  frameRate: 'high',
 })
 
-// ─── App ──────────────────────────────────────────────────────────────────────
 export default function App() {
-  const btnRef = useRef()
-
-  // Wire the HTML button to the XR store
   useEffect(() => {
     const btn = document.getElementById('enter-vr-btn')
     const status = document.getElementById('status')
@@ -24,7 +18,6 @@ export default function App() {
 
     if (!btn) return
 
-    // Check WebXR support
     if (!navigator.xr) {
       btn.textContent = 'WebXR Not Available'
       btn.disabled = true
@@ -62,8 +55,8 @@ export default function App() {
         far: 100,
         position: [0, 1.24, 2],
       }}
-      shadows={false}
     >
+      <color attach="background" args={['#0a0f14']} />
       <XR store={xrStore}>
         <Scene />
       </XR>

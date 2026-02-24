@@ -1,76 +1,52 @@
-import { useRef } from 'react'
-import { RobotBody } from './RobotBody.jsx'
-import { RobotArm } from './RobotArm.jsx'
-import { HandTracker, TrackingHUD } from './HandTracker.jsx'
+import { URDFRobot, TrackingHUD } from './URDFRobot.jsx'
 
 // ─── Environment ──────────────────────────────────────────────────────────────
 function Environment() {
   return (
     <>
       {/* Grid floor for spatial reference */}
-      <gridHelper args={[20, 40, '#003344', '#001a22']} position={[0, -1.4, 0]} />
+      <gridHelper args={[20, 40, '#335566', '#1a3344']} position={[0, -1.0, 0]} />
 
-      {/* Directional key light */}
+      {/* Strong directional key light (sun-like) */}
       <directionalLight
-        position={[3, 6, 4]}
+        position={[3, 8, 4]}
+        intensity={2.5}
+        color="#ffffff"
+      />
+
+      {/* Secondary fill from front */}
+      <directionalLight
+        position={[-2, 4, 6]}
         intensity={1.2}
-        color="#d0e8ff"
-        castShadow={false}
+        color="#e0e8ff"
       />
 
-      {/* Ambient fill */}
-      <ambientLight intensity={0.4} color="#1a2a3a" />
+      {/* Bright ambient so nothing is black */}
+      <ambientLight intensity={1.0} color="#b0c0d0" />
 
-      {/* Subtle hemisphere sky/ground */}
+      {/* Hemisphere for sky/ground separation */}
       <hemisphereLight
-        skyColor="#1a3050"
-        groundColor="#050810"
-        intensity={0.6}
+        skyColor="#87CEEB"
+        groundColor="#2a2a2a"
+        intensity={0.8}
       />
 
-      {/* Distant rim light to separate robot from background */}
+      {/* Rim/back light for depth */}
       <directionalLight
-        position={[-4, 2, -5]}
-        intensity={0.4}
-        color="#0055aa"
+        position={[-4, 3, -5]}
+        intensity={0.8}
+        color="#4488cc"
       />
     </>
   )
 }
 
 // ─── Main Scene ───────────────────────────────────────────────────────────────
-// Composes the full robot simulation:
-//   - RobotBody: torso/legs visible when looking down
-//   - Two RobotArms: driven by IK + hand retargeting
-//   - HandTracker: reads XR hand data and updates arms
-//   - TrackingHUD: tiny indicator dot for tracking quality
-//
-// No physics for Phase 1 — pure kinematic simulation.
-
 export function Scene() {
-  const leftArmRef  = useRef()
-  const rightArmRef = useRef()
-
   return (
     <>
       <Environment />
-
-      {/* Robot body (egocentric — head = camera, body hangs below) */}
-      <RobotBody />
-
-      {/* Left arm */}
-      <RobotArm ref={leftArmRef}  side="left" />
-
-      {/* Right arm */}
-      <RobotArm ref={rightArmRef} side="right" />
-
-      {/* Hand tracking + IK driver (no render output) */}
-      <HandTracker
-        leftArmRef={leftArmRef}
-        rightArmRef={rightArmRef}
-      />
-
-      {/* Tracking quality indicator */}
+      <URDFRobot />
       <TrackingHUD />
     </>
   )
