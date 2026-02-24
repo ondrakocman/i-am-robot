@@ -1,47 +1,35 @@
 import { URDFRobot, TrackingHUD } from './URDFRobot.jsx'
 
-// ─── Environment ──────────────────────────────────────────────────────────────
 function Environment() {
   return (
     <>
-      {/* Grid floor for spatial reference */}
-      <gridHelper args={[20, 40, '#335566', '#1a3344']} position={[0, -1.0, 0]} />
+      {/* Visible floor plane */}
+      <mesh rotation-x={-Math.PI / 2} position={[0, -0.01, 0]} receiveShadow>
+        <planeGeometry args={[30, 30]} />
+        <meshStandardMaterial color="#3a4a5a" roughness={0.9} metalness={0.0} />
+      </mesh>
 
-      {/* Strong directional key light (sun-like) */}
-      <directionalLight
-        position={[3, 8, 4]}
-        intensity={2.5}
-        color="#ffffff"
-      />
+      {/* Grid overlay */}
+      <gridHelper args={[30, 60, '#5588aa', '#445566']} position={[0, 0.001, 0]} />
 
-      {/* Secondary fill from front */}
-      <directionalLight
-        position={[-2, 4, 6]}
-        intensity={1.2}
-        color="#e0e8ff"
-      />
+      {/* Main key light — very bright white */}
+      <directionalLight position={[5, 10, 7]} intensity={4} color="#ffffff" />
 
-      {/* Bright ambient so nothing is black */}
-      <ambientLight intensity={1.0} color="#b0c0d0" />
+      {/* Fill from opposite side */}
+      <directionalLight position={[-4, 6, -3]} intensity={2} color="#ffffff" />
 
-      {/* Hemisphere for sky/ground separation */}
-      <hemisphereLight
-        skyColor="#87CEEB"
-        groundColor="#2a2a2a"
-        intensity={0.8}
-      />
+      {/* Front fill to illuminate the robot body facing the user */}
+      <directionalLight position={[0, 4, 8]} intensity={2} color="#eeeeff" />
 
-      {/* Rim/back light for depth */}
-      <directionalLight
-        position={[-4, 3, -5]}
-        intensity={0.8}
-        color="#4488cc"
-      />
+      {/* Strong ambient — prevents anything from being black */}
+      <ambientLight intensity={2.0} color="#ffffff" />
+
+      {/* Hemisphere for natural sky/ground color */}
+      <hemisphereLight skyColor="#aaccee" groundColor="#555555" intensity={1.5} />
     </>
   )
 }
 
-// ─── Main Scene ───────────────────────────────────────────────────────────────
 export function Scene() {
   return (
     <>

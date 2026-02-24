@@ -1,107 +1,76 @@
 import * as THREE from 'three'
 
-// ─── CCD (Cyclic Coordinate Descent) IK Solver ───────────────────────────────
-// Works on any chain of URDF revolute joints.
-// Iteratively rotates each joint to reduce end-effector error.
-//
-// Unlike analytical IK, this handles arbitrary axis configurations and
-// joint limits natively — perfect for the G1's complex shoulder offset angles.
+// ─── CCD (Cyclic Coordinate Descent) IK ──────────────────────────────────────
+// Operates entirely in world space.
+// targetPos MUST be a world-space THREE.Vector3.
+// joints: array of URDF joint objects (from shoulder toward wrist).
+// endEffector: the URDF link whose world position should reach targetPos.
 
-const _endWorld  = new THREE.Vector3()
-const _jointWorld = new THREE.Vector3()
+const _endPos    = new THREE.Vector3()
+const _jointPos  = new THREE.Vector3()
 const _toEnd     = new THREE.Vector3()
 const _toTarget  = new THREE.Vector3()
-const _axis      = new THREE.Vector3()
-const _localAxis = new THREE.Vector3()
 const _cross     = new THREE.Vector3()
-const _q         = new THREE.Quaternion()
-const _invParent = new THREE.Quaternion()
+const _localAxis = new THREE.Vector3()
+const _parentQ   = new THREE.Quaternion()
 
-export function solveCCDIK(joints, endEffector, targetPos, iterations = 12) {
+export function solveCCDIK(joints, endEffector, targetPos, iterations = 20) {
   for (let iter = 0; iter < iterations; iter++) {
+    // Check convergence
+    endEffector.getWorldPosition(_endPos)
+    if (_endPos.distanceToSquared(targetPos) < 0.0001) return // within 1cm
+
     for (let i = joints.length - 1; i >= 0; i--) {
       const joint = joints[i]
+      if (!joint.setJointValue) continue
 
-      endEffector.getWorldPosition(_endWorld)
-      joint.getWorldPosition(_jointWorld)
+      // Refresh positions each step (they change as we adjust joints)
+      endEffector.getWorldPosition(_endPos)
+      joint.getWorldPosition(_jointPos)
 
-      _toEnd.copy(_endWorld).sub(_jointWorld)
-      _toTarget.copy(targetPos).sub(_jointWorld)
+      _toEnd.subVectors(_endPos, _jointPos)
+      _toTarget.subVectors(targetPos, _jointPos)
 
-      if (_toEnd.lengthSq() < 1e-8 || _toTarget.lengthSq() < 1e-8) continue
+      const lenEnd = _toEnd.length()
+      const lenTarget = _toTarget.length()
+      if (lenEnd < 1e-6 || lenTarget < 1e-6) continue
 
-      _toEnd.normalize()
-      _toTarget.normalize()
+      _toEnd.divideScalar(lenEnd)
+      _toTarget.divideScalar(lenTarget)
 
-      // Angle between current end-effector direction and target
-      let dot = THREE.MathUtils.clamp(_toEnd.dot(_toTarget), -1, 1)
-      let angle = Math.acos(dot)
-
-      if (angle < 0.0001) continue
-
-      // Cross product gives rotation axis in world space
+      // Desired rotation axis in world space
       _cross.crossVectors(_toEnd, _toTarget)
-      if (_cross.lengthSq() < 1e-10) continue
-      _cross.normalize()
+      const sinAngle = _cross.length()
+      const cosAngle = _toEnd.dot(_toTarget)
 
-      // Convert world axis to joint's local space
-      if (joint.parent) {
-        _invParent.copy(joint.parent.getWorldQuaternion(new THREE.Quaternion())).invert()
-        _localAxis.copy(_cross).applyQuaternion(_invParent)
-      } else {
-        _localAxis.copy(_cross)
-      }
+      if (sinAngle < 1e-6) continue
 
-      // For URDF revolute joints, project onto the joint's rotation axis
-      if (joint.axis) {
-        const axisDot = _localAxis.dot(joint.axis)
-        // Use the sign to determine rotation direction
-        angle = angle * Math.sign(axisDot)
-      }
+      _cross.divideScalar(sinAngle)
 
-      // Clamp step size to prevent overshooting
-      angle = THREE.MathUtils.clamp(angle, -0.4, 0.4)
+      // Convert world rotation axis to the joint's parent frame
+      // (because joint.axis is defined in its parent's local frame)
+      joint.parent.getWorldQuaternion(_parentQ)
+      _parentQ.invert()
+      _localAxis.copy(_cross).applyQuaternion(_parentQ)
 
-      // Apply rotation
-      const currentAngle = (joint.angle || 0) + angle
-      const clamped = clampJointAngle(joint, currentAngle)
-      if (joint.setJointValue) {
-        joint.setJointValue(clamped)
-      }
+      // Project onto the joint's single rotation axis (revolute joint constraint)
+      const projection = _localAxis.dot(joint.axis)
+      if (Math.abs(projection) < 0.01) continue
+
+      // Compute the angle change along this joint axis
+      let angle = Math.atan2(sinAngle, cosAngle) * Math.sign(projection)
+
+      // Damping: reduce step size to prevent oscillation
+      angle *= 0.6
+
+      // Apply
+      const newAngle = (joint.angle || 0) + angle
+      const clamped = clamp(newAngle, joint.limit?.lower ?? -Math.PI, joint.limit?.upper ?? Math.PI)
+      joint.setJointValue(clamped)
     }
   }
 }
 
-function clampJointAngle(joint, angle) {
-  if (joint.limit) {
-    return THREE.MathUtils.clamp(angle, joint.limit.lower, joint.limit.upper)
-  }
-  return angle
-}
-
-// ─── Wrist orientation matching ──────────────────────────────────────────────
-// After solving position IK for the arm, solve wrist joints to match
-// the desired wrist orientation from hand tracking.
-
-const _currentQ = new THREE.Quaternion()
-const _desiredLocal = new THREE.Quaternion()
-
-export function solveWristOrientation(wristJoints, endLink, targetQuat, iterations = 6) {
-  for (let iter = 0; iter < iterations; iter++) {
-    endLink.getWorldQuaternion(_currentQ)
-    _desiredLocal.copy(_currentQ).invert().premultiply(targetQuat)
-
-    // Decompose the remaining rotation into Euler angles matching wrist joint axes
-    const euler = new THREE.Euler().setFromQuaternion(_desiredLocal)
-    const angles = [euler.x, euler.y, euler.z]
-
-    for (let i = 0; i < wristJoints.length && i < 3; i++) {
-      const joint = wristJoints[i]
-      if (!joint || !joint.setJointValue) continue
-      const current = joint.angle || 0
-      const delta = THREE.MathUtils.clamp(angles[i] * 0.3, -0.2, 0.2)
-      const next = clampJointAngle(joint, current + delta)
-      joint.setJointValue(next)
-    }
-  }
+function clamp(v, min, max) {
+  return Math.max(min, Math.min(max, v))
 }

@@ -1,6 +1,7 @@
 import { useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
+import * as THREE from 'three'
 import { Scene } from './components/Scene.jsx'
 
 const xrStore = createXRStore({
@@ -21,7 +22,7 @@ export default function App() {
     if (!navigator.xr) {
       btn.textContent = 'WebXR Not Available'
       btn.disabled = true
-      if (status) status.textContent = 'Use Meta Quest 3 Browser or Chrome with WebXR flag'
+      if (status) status.textContent = 'Use Meta Quest 3 Browser'
       return
     }
 
@@ -29,9 +30,9 @@ export default function App() {
       if (!supported) {
         btn.textContent = 'VR Not Supported'
         btn.style.opacity = '0.5'
-        if (status) status.textContent = 'Open this page on Meta Quest 3 browser'
+        if (status) status.textContent = 'Open on Meta Quest 3 browser'
       } else {
-        if (status) status.textContent = 'Quest 3 Ready · Hand Tracking Required'
+        if (status) status.textContent = 'Quest 3 Ready'
         if (instructions) instructions.style.display = 'none'
       }
     })
@@ -48,6 +49,7 @@ export default function App() {
         antialias: true,
         alpha: false,
         powerPreference: 'high-performance',
+        toneMapping: THREE.NoToneMapping,
       }}
       camera={{
         fov: 75,
@@ -56,7 +58,7 @@ export default function App() {
         position: [0, 1.24, 2],
       }}
     >
-      <color attach="background" args={['#0a0f14']} />
+      <color attach="background" args={['#607080']} />
       <XR store={xrStore}>
         <Scene />
       </XR>
