@@ -6,6 +6,7 @@ import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { solveCCDIK } from '../systems/CCDIK.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { ExponentialSmoother, QuaternionSmoother } from '../systems/ImpedanceControl.js'
+import { WeightedMovingFilter } from '../systems/WeightedMovingFilter.js'
 import { XR_JOINT_NAMES } from '../constants/kinematics.js'
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -35,13 +36,17 @@ const ARM_CHAIN = {
 }
 const HAND_LINK = { left: 'left_hand_palm_link', right: 'right_hand_palm_link' }
 
+// Tighter self-collision limits to prevent arms crossing through the body.
+// Based on analysis of xr_teleoperate's optimization constraints.
 const COLLISION_OVERRIDES = {
-  left_shoulder_roll_joint:  { lower: -0.3 },
-  right_shoulder_roll_joint: { upper:  0.3 },
-  left_shoulder_yaw_joint:   { lower: -1.8, upper: 1.8 },
-  right_shoulder_yaw_joint:  { lower: -1.8, upper: 1.8 },
-  left_elbow_joint:          { lower: 0.05 },
-  right_elbow_joint:         { lower: 0.05 },
+  left_shoulder_roll_joint:  { lower: -0.2 },
+  right_shoulder_roll_joint: { upper:  0.2 },
+  left_shoulder_pitch_joint: { lower: -2.0, upper: 2.0 },
+  right_shoulder_pitch_joint:{ lower: -2.0, upper: 2.0 },
+  left_shoulder_yaw_joint:   { lower: -1.5, upper: 1.5 },
+  right_shoulder_yaw_joint:  { lower: -1.5, upper: 1.5 },
+  left_elbow_joint:          { lower: 0.1 },
+  right_elbow_joint:         { lower: 0.1 },
 }
 
 const EYE_LINK = 'mid360_link'
@@ -60,8 +65,12 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const modeRef = useRef(vrMode)
   modeRef.current = vrMode
 
-  const smoothL = useRef({ pos: new ExponentialSmoother(0.25), quat: new QuaternionSmoother(0.25) })
-  const smoothR = useRef({ pos: new ExponentialSmoother(0.25), quat: new QuaternionSmoother(0.25) })
+  // Input smoothing: filter raw XR tracking data before feeding to IK
+  const smoothL = useRef({ pos: new ExponentialSmoother(0.3), quat: new QuaternionSmoother(0.3) })
+  const smoothR = useRef({ pos: new ExponentialSmoother(0.3), quat: new QuaternionSmoother(0.3) })
+  // Output smoothing: WeightedMovingFilter on solved joint angles (xr_teleoperate approach)
+  const jointFilterL = useRef(new WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 7))
+  const jointFilterR = useRef(new WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 7))
   const retargetL = useRef(new RetargetingFilter(0.4))
   const retargetR = useRef(new RetargetingFilter(0.4))
 
@@ -209,7 +218,18 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
       const endLink = robot.links?.[HAND_LINK[side]]
 
       if (chainJoints.length > 0 && endLink) {
-        solveCCDIK(chainJoints, endLink, _wristPos, _wristQuat, 25)
+        solveCCDIK(chainJoints, endLink, _wristPos, _wristQuat, 20)
+
+        // Apply WeightedMovingFilter on solved joint angles (xr_teleoperate approach).
+        // This is the key anti-jitter mechanism: smooth the OUTPUT, not just the input.
+        const jf = side === 'left' ? jointFilterL.current : jointFilterR.current
+        const solvedAngles = chainJoints.map(j => j.angle || 0)
+        const filtered = jf.addData(solvedAngles)
+        chainJoints.forEach((j, idx) => {
+          if (j.setJointValue && idx < filtered.length) {
+            j.setJointValue(filtered[idx])
+          }
+        })
       }
 
       const rawData = retargetHand(xrJoints)
