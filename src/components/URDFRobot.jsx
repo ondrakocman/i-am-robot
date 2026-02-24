@@ -8,6 +8,8 @@ import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { ExponentialSmoother, QuaternionSmoother } from '../systems/ImpedanceControl.js'
 import { XR_JOINT_NAMES } from '../constants/kinematics.js'
 
+function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
+
 const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x4a4a6e, roughness: 0.4, metalness: 0.25 })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x6a6a9e, roughness: 0.35, metalness: 0.3 })
 
@@ -25,19 +27,6 @@ const ARM_CHAIN = {
   ],
 }
 const HAND_LINK = { left: 'left_hand_palm_link', right: 'right_hand_palm_link' }
-
-const FINGER_JOINTS = {
-  left: {
-    thumb:  ['left_hand_thumb_0_joint', 'left_hand_thumb_1_joint', 'left_hand_thumb_2_joint'],
-    index:  ['left_hand_index_0_joint', 'left_hand_index_1_joint'],
-    middle: ['left_hand_middle_0_joint', 'left_hand_middle_1_joint'],
-  },
-  right: {
-    thumb:  ['right_hand_thumb_0_joint', 'right_hand_thumb_1_joint', 'right_hand_thumb_2_joint'],
-    index:  ['right_hand_index_0_joint', 'right_hand_index_1_joint'],
-    middle: ['right_hand_middle_0_joint', 'right_hand_middle_1_joint'],
-  },
-}
 
 // Self-collision prevention: tighten shoulder roll limits so arms can't cross body
 const COLLISION_OVERRIDES = {
@@ -59,10 +48,10 @@ export function URDFRobot() {
   const [robot, setRobot] = useState(null)
   const calibrated = useRef(false)
 
-  const smoothL = useRef({ pos: new ExponentialSmoother(0.2), quat: new QuaternionSmoother(0.2) })
-  const smoothR = useRef({ pos: new ExponentialSmoother(0.2), quat: new QuaternionSmoother(0.2) })
-  const retargetL = useRef(new RetargetingFilter(0.25))
-  const retargetR = useRef(new RetargetingFilter(0.25))
+  const smoothL = useRef({ pos: new ExponentialSmoother(0.25), quat: new QuaternionSmoother(0.25) })
+  const smoothR = useRef({ pos: new ExponentialSmoother(0.25), quat: new QuaternionSmoother(0.25) })
+  const retargetL = useRef(new RetargetingFilter(0.4))
+  const retargetR = useRef(new RetargetingFilter(0.4))
 
   // Load URDF
   useEffect(() => {
@@ -190,25 +179,57 @@ export function URDFRobot() {
       }
 
       // ── Fingers ─────────────────────────────────────────────────────────
-      const rawAngles = retargetHand(xrJoints)
+      const rawData = retargetHand(xrJoints)
       const retarget = side === 'left' ? retargetL.current : retargetR.current
-      const angles = retarget.update(rawAngles)
-      setFingerAngles(robot, FINGER_JOINTS[side], angles)
+      const smoothed = retarget.update(rawData)
+      applyFingerAngles(robot, side, smoothed)
     }
   })
 
   return <group ref={groupRef} />
 }
 
-function setFingerAngles(robot, map, angles) {
-  if (!robot.joints || !angles) return
-  for (const [finger, jointNames] of Object.entries(map)) {
-    const vals = angles[finger]
-    if (!vals) continue
-    jointNames.forEach((name, i) => {
-      if (i < vals.length) robot.joints[name]?.setJointValue?.(vals[i])
-    })
+// Map curl factor (0-1) to a URDF joint angle.
+// Open = near 0, curled = toward whichever limit has larger magnitude.
+function curlToAngle(joint, curl) {
+  if (!joint?.limit) return 0
+  const { lower, upper } = joint.limit
+  if (Math.abs(lower) > Math.abs(upper)) return lower * curl
+  return upper * curl
+}
+
+function applyFingerAngles(robot, side, data) {
+  if (!robot.joints || !data) return
+  const prefix = side + '_hand_'
+
+  // ── Thumb j0: abduction (side-to-side) ──
+  const thumbJ0 = robot.joints[prefix + 'thumb_0_joint']
+  if (thumbJ0?.limit) {
+    const abd = data.thumb.abduction
+    // Positive abduction (spread) → positive angle for left, negative for right
+    // because the URDF Y-axis thumb rotation is mirrored by geometry
+    const sign = side === 'left' ? 1 : -1
+    const range = Math.min(Math.abs(thumbJ0.limit.lower), Math.abs(thumbJ0.limit.upper))
+    thumbJ0.setJointValue(clamp(sign * abd * range, thumbJ0.limit.lower, thumbJ0.limit.upper))
   }
+
+  // ── Thumb j1, j2: curl ──
+  const thumbJ1 = robot.joints[prefix + 'thumb_1_joint']
+  const thumbJ2 = robot.joints[prefix + 'thumb_2_joint']
+  if (thumbJ1) thumbJ1.setJointValue(curlToAngle(thumbJ1, data.thumb.curl[0]))
+  if (thumbJ2) thumbJ2.setJointValue(curlToAngle(thumbJ2, data.thumb.curl[1]))
+
+  // ── Index j0, j1: curl ──
+  const indexJ0 = robot.joints[prefix + 'index_0_joint']
+  const indexJ1 = robot.joints[prefix + 'index_1_joint']
+  if (indexJ0) indexJ0.setJointValue(curlToAngle(indexJ0, data.index.curl[0]))
+  if (indexJ1) indexJ1.setJointValue(curlToAngle(indexJ1, data.index.curl[1]))
+
+  // ── Middle j0, j1: curl ──
+  const middleJ0 = robot.joints[prefix + 'middle_0_joint']
+  const middleJ1 = robot.joints[prefix + 'middle_1_joint']
+  if (middleJ0) middleJ0.setJointValue(curlToAngle(middleJ0, data.middle.curl[0]))
+  if (middleJ1) middleJ1.setJointValue(curlToAngle(middleJ1, data.middle.curl[1]))
 }
 
 export function TrackingHUD() {
