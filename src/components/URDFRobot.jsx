@@ -44,7 +44,6 @@ const COLLISION_OVERRIDES = {
   right_elbow_joint:         { lower: 0.05 },
 }
 
-// The mid360 lidar sits at the top of the robot — best proxy for "eye level"
 const EYE_LINK = 'mid360_link'
 const EYE_LINK_FALLBACK = 'head_link'
 
@@ -53,7 +52,7 @@ const _wristPos = new THREE.Vector3()
 const _wristQuat = new THREE.Quaternion()
 const _footPos = new THREE.Vector3()
 
-export function URDFRobot({ vrMode = 'unlocked' }) {
+export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const { gl, camera } = useThree()
   const groupRef = useRef()
   const [robot, setRobot] = useState(null)
@@ -66,7 +65,6 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
   const retargetL = useRef(new RetargetingFilter(0.4))
   const retargetR = useRef(new RetargetingFilter(0.4))
 
-  // Load URDF
   useEffect(() => {
     const loader = new URDFLoader()
     const stlLoader = new STLLoader()
@@ -91,15 +89,18 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
       .catch(err => console.error('URDF load failed:', err))
   }, [])
 
-  // Setup robot in scene
   useEffect(() => {
     if (!robot || !groupRef.current) return
 
     robot.quaternion.copy(ROBOT_BASE_QUAT)
     groupRef.current.add(robot)
 
-    // Compute standing height: position group so feet touch y=0
+    // Compute standing height so feet touch y=0
     groupRef.current.position.set(0, 0, 0)
+    if (worldRef?.current) {
+      worldRef.current.position.set(0, 0, 0)
+      worldRef.current.rotation.set(0, 0, 0)
+    }
     groupRef.current.updateMatrixWorld(true)
 
     const footLink = robot.links?.left_ankle_roll_link
@@ -110,7 +111,6 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
       groupRef.current.position.y = 0.75
     }
 
-    // Override joint limits for self-collision prevention
     for (const [jointName, overrides] of Object.entries(COLLISION_OVERRIDES)) {
       const joint = robot.joints?.[jointName]
       if (joint?.limit) {
@@ -124,7 +124,6 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
     return () => { groupRef.current?.remove(robot) }
   }, [robot])
 
-  // Head visibility depends on mode
   useEffect(() => {
     if (!robot?.links?.head_link) return
     robot.links.head_link.visible = vrMode !== 'locked'
@@ -136,21 +135,26 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
     const mode = modeRef.current
     const eyeLink = robot.links?.[EYE_LINK] || robot.links?.[EYE_LINK_FALLBACK]
 
-    if (xrFrame && eyeLink) {
-      if (mode === 'locked') {
-        // ── Locked mode: robot follows camera every frame ────────────
+    // ─── One-time calibration on VR entry ───────────────────────────────
+    if (xrFrame && !calibrated.current && eyeLink) {
+      if (mode === 'locked' && worldRef?.current) {
+        // Locked: move the entire world (robot + environment together)
+        // so robot's eyes align with camera. Robot stays on the floor
+        // relative to the environment.
         const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
-        groupRef.current.rotation.y = euler.y
+        worldRef.current.rotation.y = euler.y
 
-        groupRef.current.updateMatrixWorld(true)
+        worldRef.current.updateMatrixWorld(true)
         eyeLink.getWorldPosition(_eyeWorldPos)
-        groupRef.current.position.x += camera.position.x - _eyeWorldPos.x
-        groupRef.current.position.y += camera.position.y - _eyeWorldPos.y
-        groupRef.current.position.z += camera.position.z - _eyeWorldPos.z
 
-      } else if (!calibrated.current) {
-        // ── Unlocked mode: one-time calibration ─────────────────────
-        // Align robot XZ with camera, keep Y for floor contact
+        worldRef.current.position.x += camera.position.x - _eyeWorldPos.x
+        worldRef.current.position.y += camera.position.y - _eyeWorldPos.y
+        worldRef.current.position.z += camera.position.z - _eyeWorldPos.z
+
+        calibrated.current = true
+
+      } else {
+        // Unlocked: move only the robot group. Keep Y fixed for floor.
         const savedY = groupRef.current.position.y
 
         const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
@@ -172,7 +176,6 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
     const refSpace = gl.xr.getReferenceSpace()
     if (!session || !refSpace) return
 
-    // ─── Process each hand ────────────────────────────────────────────────
     for (const source of session.inputSources) {
       if (!source.hand) continue
       const side = source.handedness
@@ -202,7 +205,6 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
       _wristPos.copy(smoothPos)
       _wristQuat.copy(smoothQuat)
 
-      // ── Arm IK ─────────────────────────────────────────────────────
       const chainJoints = ARM_CHAIN[side].map(n => robot.joints?.[n]).filter(Boolean)
       const endLink = robot.links?.[HAND_LINK[side]]
 
@@ -210,7 +212,6 @@ export function URDFRobot({ vrMode = 'unlocked' }) {
         solveCCDIK(chainJoints, endLink, _wristPos, _wristQuat, 25)
       }
 
-      // ── Fingers ────────────────────────────────────────────────────
       const rawData = retargetHand(xrJoints)
       const retarget = side === 'left' ? retargetL.current : retargetR.current
       const smoothed = retarget.update(rawData)

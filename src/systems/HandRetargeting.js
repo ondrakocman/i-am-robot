@@ -5,64 +5,30 @@ import * as THREE from 'three'
 // Outputs normalized curl/spread factors (0-1), NOT joint angles.
 // The caller maps these to actual URDF joint limits (which differ
 // between left and right hands due to mirrored joint conventions).
-//
-// Output:
-//   thumb:  { abduction: -1..1, curl: [j1_curl, j2_curl] }  (0=open, 1=closed)
-//   index:  { curl: [j0_curl, j1_curl] }
-//   middle: { curl: [j0_curl, j1_curl] }
 
 const _v0 = new THREE.Vector3()
 const _v1 = new THREE.Vector3()
-const _v2 = new THREE.Vector3()
-const _palmNormal = new THREE.Vector3()
 
 function clamp(v, min, max) {
   return Math.max(min, Math.min(max, v))
 }
 
-// Measure how curled a finger is based on tip-to-base distance ratio.
-// Returns 0 (straight) to 1 (fully curled/fist).
+// Finger curl via tip-to-base distance ratio.
+// 0 = straight, 1 = fully curled.
 function measureCurl(metacarpal, proximal, tip) {
   const fingerLength = metacarpal.distanceTo(proximal) + proximal.distanceTo(tip)
   if (fingerLength < 0.001) return 0
   const directDist = metacarpal.distanceTo(tip)
   const ratio = directDist / fingerLength
-  // ratio ~0.95 when straight, ~0.25 when fully curled
   return clamp((0.92 - ratio) / 0.60, 0, 1)
 }
 
-// Measure individual joint bend. Returns 0 (straight) to 1 (max bend).
+// Individual joint bend: 0 = straight (PI), 1 = max bend (~PI/3).
 function measureJointBend(A, B, C) {
   _v0.copy(A).sub(B).normalize()
   _v1.copy(C).sub(B).normalize()
   const angle = Math.acos(clamp(_v0.dot(_v1), -1, 1))
-  // angle = PI when straight, ~PI/3 when fully bent
-  // Map: PI → 0, PI/3 → 1
   return clamp((Math.PI - angle) / (Math.PI * 0.6), 0, 1)
-}
-
-// Thumb abduction: how far the thumb is spread from the palm.
-// Returns -1 (adducted/tucked in) to +1 (fully spread out).
-function measureThumbAbduction(wrist, indexMeta, thumbProx) {
-  // Palm forward direction: wrist → index metacarpal
-  _v0.copy(indexMeta).sub(wrist).normalize()
-  // Thumb direction: wrist → thumb proximal
-  _v1.copy(thumbProx).sub(wrist).normalize()
-
-  // Cross product gives palm normal
-  _palmNormal.crossVectors(_v0, _v1).normalize()
-
-  // Angle between palm forward and thumb direction
-  const dot = _v0.dot(_v1)
-  const angle = Math.acos(clamp(dot, -1, 1))
-
-  // Determine sign: use cross product to check which side of palm the thumb is on
-  const cross = _v0.clone().cross(_v1)
-  const sign = cross.dot(_palmNormal) > 0 ? 1 : -1
-
-  // Remap: ~30° when adducted to ~90° when spread
-  // Neutral (thumb alongside palm) ≈ 45°
-  return clamp((angle - 0.75) / 0.7 * sign, -1, 1)
 }
 
 export function retargetHand(joints) {
@@ -76,38 +42,64 @@ export function retargetHand(joints) {
 
   const get = (name) => joints[name]?.position
 
-  // ── Thumb ──────────────────────────────────────────────────────────────────
   const wrist     = get('wrist')
   const thumbMeta = get('thumb-metacarpal')
   const thumbProx = get('thumb-phalanx-proximal')
   const thumbDist = get('thumb-phalanx-distal')
   const thumbTip  = get('thumb-tip')
   const indexMeta = get('index-finger-metacarpal')
+  const indexProx = get('index-finger-phalanx-proximal')
+  const indexTip  = get('index-finger-tip')
+  const middleMeta = get('middle-finger-metacarpal')
 
+  // ── Thumb ──────────────────────────────────────────────────────────────────
   if (wrist && thumbMeta && thumbProx && thumbDist && thumbTip && indexMeta) {
-    // Abduction: side-to-side spread
-    result.thumb.abduction = measureThumbAbduction(wrist, indexMeta, thumbProx)
+    // Abduction: distance between thumb proximal and index proximal,
+    // normalized by hand span. Captures side-to-side spread reliably.
+    if (indexProx && middleMeta) {
+      const handSpan = wrist.distanceTo(middleMeta)
+      if (handSpan > 0.01) {
+        const thumbToIndex = thumbProx.distanceTo(indexProx)
+        const ratio = thumbToIndex / handSpan
+        // ratio ~0.75 neutral, ~1.1 spread, ~0.35 tucked
+        result.thumb.abduction = clamp((ratio - 0.75) / 0.35, -1, 1)
+      }
+    }
 
-    // Thumb curl: j1 (proximal flexion) and j2 (distal flexion)
-    result.thumb.curl[0] = measureJointBend(thumbMeta, thumbProx, thumbDist)
-    result.thumb.curl[1] = measureJointBend(thumbProx, thumbDist, thumbTip)
+    // Curl: distance-based for much better pinch/curl sensitivity.
+    // Bone-angle measurement is too insensitive for the thumb's complex motion.
+    const thumbLen = thumbMeta.distanceTo(thumbProx) +
+                     thumbProx.distanceTo(thumbDist) +
+                     thumbDist.distanceTo(thumbTip)
+
+    if (thumbLen > 0.01) {
+      // General curl: how close is thumb tip to wrist?
+      const tipToWrist = thumbTip.distanceTo(wrist)
+      const generalCurl = clamp(1 - tipToWrist / (thumbLen * 1.3), 0, 1)
+
+      // Pinch boost: extra curl when thumb tip approaches index finger tip
+      let pinchBoost = 0
+      if (indexTip) {
+        const pinchDist = thumbTip.distanceTo(indexTip)
+        pinchBoost = clamp(1 - pinchDist / 0.06, 0, 1) * 0.5
+      }
+
+      const totalCurl = clamp(generalCurl + pinchBoost, 0, 1)
+      result.thumb.curl[0] = totalCurl
+      result.thumb.curl[1] = clamp(totalCurl * 1.2, 0, 1)
+    }
   }
 
   // ── Index ──────────────────────────────────────────────────────────────────
-  const indexProx = get('index-finger-phalanx-proximal')
   const indexMid  = get('index-finger-phalanx-intermediate')
   const indexDist = get('index-finger-phalanx-distal')
-  const indexTip  = get('index-finger-tip')
 
   if (indexMeta && indexProx && indexMid && indexDist && indexTip) {
-    // Overall curl for j0 (metacarpal-proximal flexion)
     result.index.curl[0] = measureCurl(indexMeta, indexProx, indexTip)
-    // Distal curl for j1
     result.index.curl[1] = measureJointBend(indexMid, indexDist, indexTip)
   }
 
   // ── Middle ─────────────────────────────────────────────────────────────────
-  const middleMeta = get('middle-finger-metacarpal')
   const middleProx = get('middle-finger-phalanx-proximal')
   const middleMid  = get('middle-finger-phalanx-intermediate')
   const middleDist = get('middle-finger-phalanx-distal')

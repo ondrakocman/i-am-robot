@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import { URDFRobot, TrackingHUD } from './URDFRobot.jsx'
 
 function Environment() {
@@ -31,10 +32,14 @@ function Environment() {
 }
 
 export function Scene({ vrMode }) {
+  const worldRef = useRef()
+
   return (
     <>
-      <Environment />
-      <URDFRobot vrMode={vrMode} />
+      <group ref={worldRef}>
+        <Environment />
+        <URDFRobot vrMode={vrMode} worldRef={worldRef} />
+      </group>
       <TrackingHUD />
     </>
   )
