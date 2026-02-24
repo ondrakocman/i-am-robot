@@ -30,11 +30,11 @@ function Environment() {
   )
 }
 
-export function Scene() {
+export function Scene({ vrMode }) {
   return (
     <>
       <Environment />
-      <URDFRobot />
+      <URDFRobot vrMode={vrMode} />
       <TrackingHUD />
     </>
   )

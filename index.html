@@ -18,30 +18,53 @@
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 16px;
+      gap: 14px;
       z-index: 100;
       pointer-events: none;
     }
 
-    #enter-vr-btn {
+    .vr-btn-row {
+      display: flex;
+      gap: 12px;
+      pointer-events: all;
+    }
+
+    .vr-btn {
       pointer-events: all;
       background: linear-gradient(135deg, #1a1a2e, #16213e);
       color: #00d4ff;
       border: 1px solid #00d4ff44;
-      padding: 14px 40px;
+      padding: 14px 28px;
       border-radius: 8px;
-      font-size: 15px;
+      font-size: 14px;
       font-weight: 600;
-      letter-spacing: 0.08em;
+      letter-spacing: 0.06em;
       cursor: pointer;
       text-transform: uppercase;
       transition: all 0.2s;
       box-shadow: 0 0 30px #00d4ff22;
     }
-    #enter-vr-btn:hover {
+    .vr-btn:hover {
       background: linear-gradient(135deg, #00d4ff22, #0066ff22);
       box-shadow: 0 0 50px #00d4ff44;
       border-color: #00d4ff88;
+    }
+    .vr-btn.locked {
+      color: #ff8844;
+      border-color: #ff884444;
+      box-shadow: 0 0 30px #ff884422;
+    }
+    .vr-btn.locked:hover {
+      background: linear-gradient(135deg, #ff884422, #ff440022);
+      box-shadow: 0 0 50px #ff884444;
+      border-color: #ff884488;
+    }
+
+    .mode-desc {
+      font-size: 11px;
+      opacity: 0.6;
+      margin-top: 2px;
+      font-weight: 400;
     }
 
     #status {
@@ -66,7 +89,16 @@
 <body>
   <div id="root"></div>
   <div id="ui-overlay">
-    <button id="enter-vr-btn">Enter VR — Become Robot</button>
+    <div class="vr-btn-row">
+      <button id="enter-vr-locked" class="vr-btn locked">
+        First Person
+        <div class="mode-desc">View locked to robot head</div>
+      </button>
+      <button id="enter-vr-unlocked" class="vr-btn">
+        Third Person
+        <div class="mode-desc">Static robot, free camera</div>
+      </button>
+    </div>
     <span id="status">Quest 3 · Hand Tracking Required</span>
   </div>
   <div id="instructions">

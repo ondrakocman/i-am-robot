@@ -1,4 +1,4 @@
-import { useEffect } from 'react'
+import { useEffect, useState } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
 import * as THREE from 'three'
@@ -12,24 +12,29 @@ const xrStore = createXRStore({
 })
 
 export default function App() {
+  const [vrMode, setVrMode] = useState('unlocked')
+
   useEffect(() => {
-    const btn = document.getElementById('enter-vr-btn')
+    const lockedBtn = document.getElementById('enter-vr-locked')
+    const unlockedBtn = document.getElementById('enter-vr-unlocked')
     const status = document.getElementById('status')
     const instructions = document.querySelector('#instructions')
 
-    if (!btn) return
+    if (!lockedBtn || !unlockedBtn) return
 
     if (!navigator.xr) {
-      btn.textContent = 'WebXR Not Available'
-      btn.disabled = true
+      lockedBtn.textContent = 'WebXR N/A'
+      unlockedBtn.textContent = 'WebXR N/A'
+      lockedBtn.disabled = true
+      unlockedBtn.disabled = true
       if (status) status.textContent = 'Use Meta Quest 3 Browser'
       return
     }
 
     navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
       if (!supported) {
-        btn.textContent = 'VR Not Supported'
-        btn.style.opacity = '0.5'
+        lockedBtn.style.opacity = '0.5'
+        unlockedBtn.style.opacity = '0.5'
         if (status) status.textContent = 'Open on Meta Quest 3 browser'
       } else {
         if (status) status.textContent = 'Quest 3 Ready'
@@ -37,9 +42,15 @@ export default function App() {
       }
     })
 
-    const handleClick = () => xrStore.enterVR()
-    btn.addEventListener('click', handleClick)
-    return () => btn.removeEventListener('click', handleClick)
+    const enterLocked = () => { setVrMode('locked'); xrStore.enterVR() }
+    const enterUnlocked = () => { setVrMode('unlocked'); xrStore.enterVR() }
+
+    lockedBtn.addEventListener('click', enterLocked)
+    unlockedBtn.addEventListener('click', enterUnlocked)
+    return () => {
+      lockedBtn.removeEventListener('click', enterLocked)
+      unlockedBtn.removeEventListener('click', enterUnlocked)
+    }
   }, [])
 
   return (
@@ -60,7 +71,7 @@ export default function App() {
     >
       <color attach="background" args={['#607080']} />
       <XR store={xrStore}>
-        <Scene />
+        <Scene vrMode={vrMode} />
       </XR>
     </Canvas>
   )
