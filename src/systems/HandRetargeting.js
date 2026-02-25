@@ -48,7 +48,7 @@ export function retargetHand(joints) {
     _v0.copy(thumbProx).sub(thumbMeta).normalize()
     _v1.copy(indexProx).sub(indexMeta).normalize()
     const angle = Math.acos(clamp(_v0.dot(_v1), -1, 1))
-    result.thumb.abduction = clamp((angle - 0.9) / 0.5, -1, 1)
+    result.thumb.abduction = clamp((angle - 0.9) / 0.65, -1, 1)
 
     // Thumb curl: direct joint bend measurement (×1.5 compensates for thumb's smaller flex range)
     result.thumb.curl[0] = clamp(measureJointBend(thumbMeta, thumbProx, thumbDist) * 1.5, 0, 1)
@@ -95,7 +95,7 @@ export class RetargetingFilter {
     const a = this.alpha
     const lerp = (prev, next) => prev + (next - prev) * a
 
-    this.last.thumb.abduction = lerp(this.last.thumb.abduction, raw.thumb.abduction)
+    this.last.thumb.abduction += (raw.thumb.abduction - this.last.thumb.abduction) * a * 0.4
     this.last.thumb.curl  = raw.thumb.curl.map((v, i)  => lerp(this.last.thumb.curl[i],  v))
     this.last.index.curl  = raw.index.curl.map((v, i)  => lerp(this.last.index.curl[i],  v))
     this.last.middle.curl = raw.middle.curl.map((v, i) => lerp(this.last.middle.curl[i], v))
