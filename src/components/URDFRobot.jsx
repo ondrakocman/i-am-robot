@@ -37,19 +37,27 @@ const ARM_CHAIN = {
 }
 const HAND_LINK = { left: 'left_hand_palm_link', right: 'right_hand_palm_link' }
 
-// Soft joint limits -- now that Rapier handles actual collision, these only
-// need to prevent extreme inward shoulder roll (arm through torso).
 const COLLISION_OVERRIDES = {
-  left_shoulder_roll_joint:   { lower: -0.5 },
-  right_shoulder_roll_joint:  { upper:  0.5 },
-  left_elbow_joint:           { lower: 0.05 },
-  right_elbow_joint:          { lower: 0.05 },
+  left_shoulder_roll_joint:   { lower: -0.2 },
+  right_shoulder_roll_joint:  { upper:  0.2 },
+  left_shoulder_pitch_joint:  { lower: -2.0, upper: 2.0 },
+  right_shoulder_pitch_joint: { lower: -2.0, upper: 2.0 },
+  left_shoulder_yaw_joint:    { lower: -1.5, upper: 1.5 },
+  right_shoulder_yaw_joint:   { lower: -1.5, upper: 1.5 },
+  left_elbow_joint:           { lower: 0.1 },
+  right_elbow_joint:          { lower: 0.1 },
 }
 
 const EYE_LINK = 'mid360_link'
 const EYE_LINK_FALLBACK = 'head_link'
 const COLLISION_GRACE_FRAMES = 30
-const ORIENT_CALIBRATION_FRAME = 5
+
+// Constant frame correction: WebXR wrist has -Z=fingers, +Y=back-of-hand.
+// URDF palm has +X=fingers, +Y=back-of-hand. Same Y axis, fingers differ
+// by 90° around Y. Post-multiply XR quat by Ry(π/2) to align.
+const XR_TO_URDF_QUAT = new THREE.Quaternion().setFromAxisAngle(
+  new THREE.Vector3(0, 1, 0), Math.PI / 2
+)
 
 const _eyeWorld = new THREE.Vector3()
 const _wristPos = new THREE.Vector3()
@@ -77,11 +85,6 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const safeAngles = useRef({ left: new Float64Array(7), right: new Float64Array(7) })
   const collision = useRef({ left: false, right: false })
   const trackingFrames = useRef({ left: 0, right: 0 })
-
-  // Runtime orientation calibration: captures the constant frame offset
-  // between the WebXR wrist convention and the URDF palm link frame.
-  // Computed once after a few frames of stable tracking.
-  const orientCorrection = useRef({ left: null, right: null })
 
   // ── Load URDF ────────────────────────────────────────────────────────────
 
@@ -159,7 +162,6 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
     }
 
     calibrated.current = false
-    orientCorrection.current = { left: null, right: null }
 
     return () => {
       groupRef.current?.remove(robot)
@@ -219,25 +221,7 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
 
       const frames = ++trackingFrames.current[side]
 
-      // Compute orientation correction on frame ORIENT_CALIBRATION_FRAME
-      if (frames === ORIENT_CALIBRATION_FRAME && !orientCorrection.current[side]) {
-        const endLink = robot.links?.[HAND_LINK[side]]
-        if (endLink) {
-          groupRef.current.updateMatrixWorld(true)
-          const palmQ = new THREE.Quaternion()
-          endLink.getWorldQuaternion(palmQ)
-          const xrInv = xrJoints['wrist'].quaternion.clone().invert()
-          orientCorrection.current[side] = palmQ.multiply(xrInv)
-        }
-      }
-
-      // Apply orientation correction then smooth
-      const corr = orientCorrection.current[side]
-      if (corr) {
-        _correctedQuat.copy(corr).multiply(xrJoints['wrist'].quaternion)
-      } else {
-        _correctedQuat.copy(xrJoints['wrist'].quaternion)
-      }
+      _correctedQuat.copy(xrJoints['wrist'].quaternion).multiply(XR_TO_URDF_QUAT)
 
       const sm = side === 'left' ? smoothL.current : smoothR.current
       _wristPos.copy(sm.pos.update(xrJoints['wrist'].position))
