@@ -48,7 +48,7 @@ export function retargetHand(joints) {
     _v0.copy(thumbProx).sub(thumbMeta).normalize()
     _v1.copy(indexProx).sub(indexMeta).normalize()
     const angle = Math.acos(clamp(_v0.dot(_v1), -1, 1))
-    result.thumb.abduction = clamp((angle - 1.0) / 0.5, -1, 1)
+    result.thumb.abduction = clamp((angle - 1.3) / 0.5, -1, 1)
 
     // Thumb curl: direct joint bend measurement (×1.5 compensates for thumb's smaller flex range)
     result.thumb.curl[0] = clamp(measureJointBend(thumbMeta, thumbProx, thumbDist) * 1.5, 0, 1)
