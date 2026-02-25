@@ -52,11 +52,17 @@ const EYE_LINK = 'mid360_link'
 const EYE_LINK_FALLBACK = 'head_link'
 const COLLISION_GRACE_FRAMES = 30
 
-// Constant frame correction: WebXR wrist has -Z=fingers, +Y=back-of-hand.
-// URDF palm has +X=fingers, +Y=back-of-hand. Same Y axis, fingers differ
-// by 90° around Y. Post-multiply XR quat by Ry(π/2) to align.
-const XR_TO_URDF_QUAT = new THREE.Quaternion().setFromAxisAngle(
+// Frame correction: WebXR wrist has -Z=fingers, +Y=back-of-hand.
+// URDF palm has +X=fingers. Left palm faces -Y, right palm faces +Y
+// (confirmed by mirrored finger curl limits in the URDF).
+// Left:  Ry(π/2) aligns fingers (-Z→+X) and keeps Y axis.
+// Right: Rz(π)·Ry(π/2) also flips the palm normal axis.
+const XR_TO_URDF_L = new THREE.Quaternion().setFromAxisAngle(
   new THREE.Vector3(0, 1, 0), Math.PI / 2
+)
+const XR_TO_URDF_R = new THREE.Quaternion().multiplyQuaternions(
+  new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI),
+  new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2),
 )
 
 const _eyeWorld = new THREE.Vector3()
@@ -221,7 +227,8 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
 
       const frames = ++trackingFrames.current[side]
 
-      _correctedQuat.copy(xrJoints['wrist'].quaternion).multiply(XR_TO_URDF_QUAT)
+      const correction = side === 'left' ? XR_TO_URDF_L : XR_TO_URDF_R
+      _correctedQuat.copy(xrJoints['wrist'].quaternion).multiply(correction)
 
       const sm = side === 'left' ? smoothL.current : smoothR.current
       _wristPos.copy(sm.pos.update(xrJoints['wrist'].position))
