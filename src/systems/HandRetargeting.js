@@ -10,13 +10,13 @@ function clamp(v, min, max) {
 function measureCurl(metacarpal, proximal, tip) {
   const len = metacarpal.distanceTo(proximal) + proximal.distanceTo(tip)
   if (len < 0.001) return 0
-  return clamp((0.92 - metacarpal.distanceTo(tip) / len) / 0.60, 0, 1)
+  return clamp((0.92 - metacarpal.distanceTo(tip) / len) / 0.35, 0, 1)
 }
 
 function measureJointBend(A, B, C) {
   _v0.copy(A).sub(B).normalize()
   _v1.copy(C).sub(B).normalize()
-  return clamp((Math.PI - Math.acos(clamp(_v0.dot(_v1), -1, 1))) / (Math.PI * 0.6), 0, 1)
+  return clamp((Math.PI - Math.acos(clamp(_v0.dot(_v1), -1, 1))) / (Math.PI * 0.35), 0, 1)
 }
 
 /**

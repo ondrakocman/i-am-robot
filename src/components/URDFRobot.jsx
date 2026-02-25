@@ -332,9 +332,8 @@ function applyFingerAngles(robot, side, data) {
 
   const t0 = robot.joints[p + 'thumb_0_joint']
   if (t0?.limit) {
-    const sign = side === 'left' ? 1 : -1
     const range = Math.min(Math.abs(t0.limit.lower), Math.abs(t0.limit.upper))
-    t0.setJointValue(clamp(sign * data.thumb.abduction * range, t0.limit.lower, t0.limit.upper))
+    t0.setJointValue(clamp(data.thumb.abduction * range, t0.limit.lower, t0.limit.upper))
   }
 
   const t1 = robot.joints[p + 'thumb_1_joint']
