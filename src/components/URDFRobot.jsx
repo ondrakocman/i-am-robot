@@ -79,6 +79,8 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const physicsRef = useRef(null)
   const safeAngles = useRef({ left: new Float64Array(7), right: new Float64Array(7) })
   const collision = useRef({ left: false, right: false })
+  const trackingFrames = useRef({ left: 0, right: 0 })
+  const COLLISION_GRACE_FRAMES = 30
 
   // ── Load URDF (deferred until all STL meshes finish) ─────────────────────
 
@@ -191,9 +193,13 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
 
     const eyeLink = robot.links?.[EYE_LINK] || robot.links?.[EYE_LINK_FALLBACK]
 
-    if (xrFrame && !calibrated.current && eyeLink) {
-      calibrateView(modeRef.current, camera, groupRef, worldRef, eyeLink)
-      calibrated.current = true
+    if (xrFrame && eyeLink) {
+      if (!calibrated.current) {
+        calibrateView(modeRef.current, camera, groupRef, worldRef, eyeLink)
+        calibrated.current = true
+      } else if (modeRef.current === 'locked' && worldRef?.current) {
+        lockViewToEye(camera, worldRef, eyeLink)
+      }
     }
 
     if (!xrFrame) return
@@ -217,11 +223,15 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
       const endLink = robot.links?.[HAND_LINK[side]]
 
       if (chain.length > 0 && endLink) {
-        if (collision.current[side]) {
+        const filter = side === 'left' ? jointFilterL.current : jointFilterR.current
+        const frames = ++trackingFrames.current[side]
+        const colliding = collision.current[side] && frames > COLLISION_GRACE_FRAMES
+
+        solveAndFilter(chain, endLink, _wristPos, _wristQuat, filter)
+
+        if (colliding) {
           blendToSafe(chain, safeAngles.current[side])
         } else {
-          solveAndFilter(chain, endLink, _wristPos, _wristQuat,
-            side === 'left' ? jointFilterL.current : jointFilterR.current)
           saveAngles(chain, safeAngles.current[side])
         }
       }
@@ -256,6 +266,14 @@ function calibrateView(mode, camera, groupRef, worldRef, eyeLink) {
     groupRef.current.position.z += camera.position.z - _eyeWorld.z
     groupRef.current.position.y = savedY
   }
+}
+
+function lockViewToEye(camera, worldRef, eyeLink) {
+  worldRef.current.updateMatrixWorld(true)
+  eyeLink.getWorldPosition(_eyeWorld)
+  worldRef.current.position.x += camera.position.x - _eyeWorld.x
+  worldRef.current.position.y += camera.position.y - _eyeWorld.y
+  worldRef.current.position.z += camera.position.z - _eyeWorld.z
 }
 
 function readXRJoints(xrFrame, source, refSpace) {
