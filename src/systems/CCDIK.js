@@ -11,10 +11,10 @@ const _endQuat = new THREE.Quaternion()
 const _deltaQuat = new THREE.Quaternion()
 const _orientAxis = new THREE.Vector3()
 
-const MAX_ANGLE_STEP = 0.3
-const REGULARIZATION = 0.003
-const SMOOTH_COST = 0.03
-const DAMPING = 0.7
+const MAX_ANGLE_STEP = 0.15
+const REGULARIZATION = 0.005
+const SMOOTH_COST = 0.08
+const DAMPING = 0.4
 
 /**
  * CCD IK with proximal/distal split weighting:
