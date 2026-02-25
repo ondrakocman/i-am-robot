@@ -80,10 +80,10 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const modeRef = useRef(vrMode)
   modeRef.current = vrMode
 
-  const smoothL = useRef({ pos: new ExponentialSmoother(0.3), quat: new QuaternionSmoother(0.3) })
-  const smoothR = useRef({ pos: new ExponentialSmoother(0.3), quat: new QuaternionSmoother(0.3) })
-  const jointFilterL = useRef(new WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 7))
-  const jointFilterR = useRef(new WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 7))
+  const smoothL = useRef({ pos: new ExponentialSmoother(0.5), quat: new QuaternionSmoother(0.5) })
+  const smoothR = useRef({ pos: new ExponentialSmoother(0.5), quat: new QuaternionSmoother(0.5) })
+  const jointFilterL = useRef(new WeightedMovingFilter([0.7, 0.2, 0.1], 7))
+  const jointFilterR = useRef(new WeightedMovingFilter([0.7, 0.2, 0.1], 7))
   const retargetL = useRef(new RetargetingFilter(0.4))
   const retargetR = useRef(new RetargetingFilter(0.4))
 
