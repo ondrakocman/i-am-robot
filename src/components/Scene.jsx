@@ -2,6 +2,7 @@ import { useRef } from 'react'
 import { Physics, RigidBody, CuboidCollider } from '@react-three/rapier'
 import { URDFRobot, TrackingHUD } from './URDFRobot.jsx'
 import { TestObjects } from './TestObjects.jsx'
+import { HandDebugPoints } from './HandDebugPoints.jsx'
 
 function Environment() {
   return (
@@ -43,6 +44,7 @@ export function Scene({ vrMode }) {
           <TestObjects />
         </group>
       </Physics>
+      <HandDebugPoints />
       <TrackingHUD />
     </>
   )
