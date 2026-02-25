@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
+import { useRapier, useBeforePhysicsStep, useAfterPhysicsStep } from '@react-three/rapier'
 import * as THREE from 'three'
 import URDFLoader from 'urdf-loader'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
@@ -7,6 +8,7 @@ import { solveCCDIK } from '../systems/CCDIK.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { ExponentialSmoother, QuaternionSmoother } from '../systems/ImpedanceControl.js'
 import { WeightedMovingFilter } from '../systems/WeightedMovingFilter.js'
+import { PhysicsManager } from '../systems/PhysicsManager.js'
 import { XR_JOINT_NAMES } from '../constants/kinematics.js'
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
@@ -59,27 +61,40 @@ const _footPos = new THREE.Vector3()
 
 export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const { gl, camera } = useThree()
+  const { world, rapier } = useRapier()
   const groupRef = useRef()
   const [robot, setRobot] = useState(null)
   const calibrated = useRef(false)
   const modeRef = useRef(vrMode)
   modeRef.current = vrMode
 
-  // Input smoothing: filter raw XR tracking data before feeding to IK
   const smoothL = useRef({ pos: new ExponentialSmoother(0.3), quat: new QuaternionSmoother(0.3) })
   const smoothR = useRef({ pos: new ExponentialSmoother(0.3), quat: new QuaternionSmoother(0.3) })
-  // Output smoothing: WeightedMovingFilter on solved joint angles (xr_teleoperate approach)
   const jointFilterL = useRef(new WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 7))
   const jointFilterR = useRef(new WeightedMovingFilter([0.4, 0.3, 0.2, 0.1], 7))
   const retargetL = useRef(new RetargetingFilter(0.4))
   const retargetR = useRef(new RetargetingFilter(0.4))
 
+  const physicsRef = useRef(null)
+  const safeAnglesRef = useRef({ left: new Float64Array(7), right: new Float64Array(7) })
+  const collisionRef = useRef({ left: false, right: false })
+
   useEffect(() => {
     const loader = new URDFLoader()
     const stlLoader = new STLLoader()
     const basePath = import.meta.env.BASE_URL + 'models/'
+    let pending = 0
+    let parsedRobot = null
+    let cancelled = false
+
+    const checkComplete = () => {
+      if (pending === 0 && parsedRobot && !cancelled) {
+        setRobot(parsedRobot)
+      }
+    }
 
     loader.loadMeshCb = (path, _manager, onLoad) => {
+      pending++
       stlLoader.load(basePath + path, (geometry) => {
         geometry.computeVertexNormals()
         const isAccent = path.includes('contour') || path.includes('shoulder_roll') ||
@@ -89,13 +104,24 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
         const group = new THREE.Group()
         group.add(mesh)
         onLoad(group)
-      }, undefined, () => onLoad(new THREE.Group()))
+        pending--
+        checkComplete()
+      }, undefined, () => {
+        onLoad(new THREE.Group())
+        pending--
+        checkComplete()
+      })
     }
 
     fetch(basePath + 'g1.urdf')
       .then(r => r.text())
-      .then(urdfText => setRobot(loader.parse(urdfText)))
+      .then(urdfText => {
+        parsedRobot = loader.parse(urdfText)
+        checkComplete()
+      })
       .catch(err => console.error('URDF load failed:', err))
+
+    return () => { cancelled = true }
   }, [])
 
   useEffect(() => {
@@ -104,7 +130,6 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
     robot.quaternion.copy(ROBOT_BASE_QUAT)
     groupRef.current.add(robot)
 
-    // Compute standing height so feet touch y=0
     groupRef.current.position.set(0, 0, 0)
     if (worldRef?.current) {
       worldRef.current.position.set(0, 0, 0)
@@ -128,15 +153,42 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
       }
     }
 
+    groupRef.current.updateMatrixWorld(true)
+
+    if (world && rapier) {
+      const pm = new PhysicsManager(rapier, world)
+      pm.init(robot)
+      physicsRef.current = pm
+    }
+
     calibrated.current = false
 
-    return () => { groupRef.current?.remove(robot) }
-  }, [robot])
+    return () => {
+      groupRef.current?.remove(robot)
+      if (physicsRef.current) {
+        physicsRef.current.dispose()
+        physicsRef.current = null
+      }
+    }
+  }, [robot, world, rapier])
 
   useEffect(() => {
     if (!robot?.links?.head_link) return
     robot.links.head_link.visible = vrMode !== 'locked'
   }, [robot, vrMode])
+
+  useBeforePhysicsStep(() => {
+    if (!robot || !physicsRef.current) return
+    groupRef.current?.updateMatrixWorld(true)
+    physicsRef.current.syncToPhysics(robot)
+  })
+
+  useAfterPhysicsStep(() => {
+    if (!physicsRef.current) return
+    const sides = physicsRef.current.checkCollisions()
+    collisionRef.current.left = sides.left
+    collisionRef.current.right = sides.right
+  })
 
   useFrame((state, delta, xrFrame) => {
     if (!robot || !groupRef.current) return
@@ -144,12 +196,8 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
     const mode = modeRef.current
     const eyeLink = robot.links?.[EYE_LINK] || robot.links?.[EYE_LINK_FALLBACK]
 
-    // ─── One-time calibration on VR entry ───────────────────────────────
     if (xrFrame && !calibrated.current && eyeLink) {
       if (mode === 'locked' && worldRef?.current) {
-        // Locked: move the entire world (robot + environment together)
-        // so robot's eyes align with camera. Robot stays on the floor
-        // relative to the environment.
         const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
         worldRef.current.rotation.y = euler.y
 
@@ -163,7 +211,6 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
         calibrated.current = true
 
       } else {
-        // Unlocked: move only the robot group. Keep Y fixed for floor.
         const savedY = groupRef.current.position.y
 
         const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
@@ -218,18 +265,33 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
       const endLink = robot.links?.[HAND_LINK[side]]
 
       if (chainJoints.length > 0 && endLink) {
-        solveCCDIK(chainJoints, endLink, _wristPos, _wristQuat, 20)
+        const isColliding = collisionRef.current[side]
 
-        // Apply WeightedMovingFilter on solved joint angles (xr_teleoperate approach).
-        // This is the key anti-jitter mechanism: smooth the OUTPUT, not just the input.
-        const jf = side === 'left' ? jointFilterL.current : jointFilterR.current
-        const solvedAngles = chainJoints.map(j => j.angle || 0)
-        const filtered = jf.addData(solvedAngles)
-        chainJoints.forEach((j, idx) => {
-          if (j.setJointValue && idx < filtered.length) {
-            j.setJointValue(filtered[idx])
-          }
-        })
+        if (isColliding) {
+          const safe = safeAnglesRef.current[side]
+          chainJoints.forEach((j, idx) => {
+            if (j.setJointValue && idx < safe.length) {
+              const cur = j.angle || 0
+              j.setJointValue(cur + (safe[idx] - cur) * 0.5)
+            }
+          })
+        } else {
+          solveCCDIK(chainJoints, endLink, _wristPos, _wristQuat, 20)
+
+          const jf = side === 'left' ? jointFilterL.current : jointFilterR.current
+          const solvedAngles = chainJoints.map(j => j.angle || 0)
+          const filtered = jf.addData(solvedAngles)
+          chainJoints.forEach((j, idx) => {
+            if (j.setJointValue && idx < filtered.length) {
+              j.setJointValue(filtered[idx])
+            }
+          })
+
+          const safe = safeAnglesRef.current[side]
+          chainJoints.forEach((j, idx) => {
+            if (idx < safe.length) safe[idx] = j.angle || 0
+          })
+        }
       }
 
       const rawData = retargetHand(xrJoints)
