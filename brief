@@ -1,0 +1,31 @@
+ Task
+
+
+Build a fully web based Imitation Learning VR data collector for Unitree G1 with dex 3.1 hands.
+
+
+The interface we are using is META Quest 3
+
+
+The interface should show the Unitree G1 robot with dex 3.1 Hands directly in the interface. I should see myself as the robot and my hands as the dex 3.1. there should be probably some calcualtion of how the robot would actually move if it was tracking my hands (probably damped a bit, following it slowly, robot cant make )
+
+
+Two data collection scenarios should be shown as demo:
+
+
+1. Table with three colored cubes: with the goal of putting them on top of each other red, green, blue
+
+
+2. Table and two baskets and 6 balls - three red, three yellow? goal is sorting them correctly.
+
+
+We need to do a thorough research on how this can be applied for collecting data that is usable.
+
+
+the enviroment that it is done in should be somehow good enough as an enviroment for collecting IL data
+
+
+I think we sould be able to collect the episode and than use some other tool to calculate data of sensors (head camera and wrist cameras) and variable enviroments (light and materials). but physics cant really be recalculated as that would affect the outcome so it needs to be done in the quest.
+
+
+Do a ton of research on how an app like this could work and create an implementation plan for agent so it can build it. weight everything, be critical and make a no bullshit plan that will work. Fill all the gaps of my idea 

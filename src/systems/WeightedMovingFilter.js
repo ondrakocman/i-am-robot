@@ -1,7 +1,7 @@
-// Port of xr_teleoperate's WeightedMovingFilter.
-// Applies a weighted moving average over the last N frames.
-// Weights must sum to 1.0, most recent frame gets highest weight.
-
+/**
+ * Weighted moving average over the last N frames.
+ * Ported from xr_teleoperate. Most recent frame gets highest weight.
+ */
 export class WeightedMovingFilter {
   constructor(weights, dataSize) {
     this.weights = weights
@@ -12,9 +12,7 @@ export class WeightedMovingFilter {
   }
 
   addData(newData) {
-    if (this.queue.length >= this.windowSize) {
-      this.queue.shift()
-    }
+    if (this.queue.length >= this.windowSize) this.queue.shift()
     this.queue.push(Float64Array.from(newData))
 
     if (this.queue.length < this.windowSize) {

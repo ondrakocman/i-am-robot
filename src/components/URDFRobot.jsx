@@ -16,7 +16,7 @@ function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
 const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x4a4a6e, roughness: 0.4, metalness: 0.25 })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x6a6a9e, roughness: 0.35, metalness: 0.3 })
 
-// URDF Z-up → Three.js Y-up, facing -Z (Three.js forward)
+// URDF Z-up -> Three.js Y-up, facing -Z
 const ROBOT_BASE_QUAT = new THREE.Quaternion()
 ;(() => {
   const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
@@ -38,26 +38,27 @@ const ARM_CHAIN = {
 }
 const HAND_LINK = { left: 'left_hand_palm_link', right: 'right_hand_palm_link' }
 
-// Tighter self-collision limits to prevent arms crossing through the body.
-// Based on analysis of xr_teleoperate's optimization constraints.
+// Tighter limits as a first-pass guard before physics collision kicks in.
 const COLLISION_OVERRIDES = {
-  left_shoulder_roll_joint:  { lower: -0.2 },
-  right_shoulder_roll_joint: { upper:  0.2 },
-  left_shoulder_pitch_joint: { lower: -2.0, upper: 2.0 },
-  right_shoulder_pitch_joint:{ lower: -2.0, upper: 2.0 },
-  left_shoulder_yaw_joint:   { lower: -1.5, upper: 1.5 },
-  right_shoulder_yaw_joint:  { lower: -1.5, upper: 1.5 },
-  left_elbow_joint:          { lower: 0.1 },
-  right_elbow_joint:         { lower: 0.1 },
+  left_shoulder_roll_joint:   { lower: -0.2 },
+  right_shoulder_roll_joint:  { upper:  0.2 },
+  left_shoulder_pitch_joint:  { lower: -2.0, upper: 2.0 },
+  right_shoulder_pitch_joint: { lower: -2.0, upper: 2.0 },
+  left_shoulder_yaw_joint:    { lower: -1.5, upper: 1.5 },
+  right_shoulder_yaw_joint:   { lower: -1.5, upper: 1.5 },
+  left_elbow_joint:           { lower: 0.1 },
+  right_elbow_joint:          { lower: 0.1 },
 }
 
 const EYE_LINK = 'mid360_link'
 const EYE_LINK_FALLBACK = 'head_link'
 
-const _eyeWorldPos = new THREE.Vector3()
+const _eyeWorld = new THREE.Vector3()
 const _wristPos = new THREE.Vector3()
 const _wristQuat = new THREE.Quaternion()
 const _footPos = new THREE.Vector3()
+
+// ────────────────────────────────────────────────────────────────────────────
 
 export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const { gl, camera } = useThree()
@@ -76,81 +77,74 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const retargetR = useRef(new RetargetingFilter(0.4))
 
   const physicsRef = useRef(null)
-  const safeAnglesRef = useRef({ left: new Float64Array(7), right: new Float64Array(7) })
-  const collisionRef = useRef({ left: false, right: false })
+  const safeAngles = useRef({ left: new Float64Array(7), right: new Float64Array(7) })
+  const collision = useRef({ left: false, right: false })
+
+  // ── Load URDF (deferred until all STL meshes finish) ─────────────────────
 
   useEffect(() => {
     const loader = new URDFLoader()
     const stlLoader = new STLLoader()
-    const basePath = import.meta.env.BASE_URL + 'models/'
+    const base = import.meta.env.BASE_URL + 'models/'
     let pending = 0
-    let parsedRobot = null
+    let parsed = null
     let cancelled = false
 
-    const checkComplete = () => {
-      if (pending === 0 && parsedRobot && !cancelled) {
-        setRobot(parsedRobot)
-      }
+    const tryFinalize = () => {
+      if (pending === 0 && parsed && !cancelled) setRobot(parsed)
     }
 
-    loader.loadMeshCb = (path, _manager, onLoad) => {
+    loader.loadMeshCb = (path, _mgr, onLoad) => {
       pending++
-      stlLoader.load(basePath + path, (geometry) => {
-        geometry.computeVertexNormals()
-        const isAccent = path.includes('contour') || path.includes('shoulder_roll') ||
-                         path.includes('shoulder_pitch') || path.includes('waist') ||
-                         path.includes('logo')
-        const mesh = new THREE.Mesh(geometry, (isAccent ? MAT_ACCENT : MAT_BODY).clone())
-        const group = new THREE.Group()
-        group.add(mesh)
-        onLoad(group)
+      stlLoader.load(base + path, (geo) => {
+        geo.computeVertexNormals()
+        const accent = /contour|shoulder_roll|shoulder_pitch|waist|logo/.test(path)
+        const mesh = new THREE.Mesh(geo, (accent ? MAT_ACCENT : MAT_BODY).clone())
+        const g = new THREE.Group()
+        g.add(mesh)
+        onLoad(g)
         pending--
-        checkComplete()
-      }, undefined, () => {
-        onLoad(new THREE.Group())
-        pending--
-        checkComplete()
-      })
+        tryFinalize()
+      }, undefined, () => { onLoad(new THREE.Group()); pending--; tryFinalize() })
     }
 
-    fetch(basePath + 'g1.urdf')
+    fetch(base + 'g1.urdf')
       .then(r => r.text())
-      .then(urdfText => {
-        parsedRobot = loader.parse(urdfText)
-        checkComplete()
-      })
-      .catch(err => console.error('URDF load failed:', err))
+      .then(text => { parsed = loader.parse(text); tryFinalize() })
+      .catch(e => console.error('URDF load failed:', e))
 
     return () => { cancelled = true }
   }, [])
+
+  // ── Setup robot in scene + init physics ──────────────────────────────────
 
   useEffect(() => {
     if (!robot || !groupRef.current) return
 
     robot.quaternion.copy(ROBOT_BASE_QUAT)
     groupRef.current.add(robot)
-
     groupRef.current.position.set(0, 0, 0)
+
     if (worldRef?.current) {
       worldRef.current.position.set(0, 0, 0)
       worldRef.current.rotation.set(0, 0, 0)
     }
+
     groupRef.current.updateMatrixWorld(true)
 
-    const footLink = robot.links?.left_ankle_roll_link
-    if (footLink) {
-      footLink.getWorldPosition(_footPos)
+    const foot = robot.links?.left_ankle_roll_link
+    if (foot) {
+      foot.getWorldPosition(_footPos)
       groupRef.current.position.y = -_footPos.y + 0.015
     } else {
       groupRef.current.position.y = 0.75
     }
 
-    for (const [jointName, overrides] of Object.entries(COLLISION_OVERRIDES)) {
-      const joint = robot.joints?.[jointName]
-      if (joint?.limit) {
-        if (overrides.lower !== undefined) joint.limit.lower = Math.max(joint.limit.lower, overrides.lower)
-        if (overrides.upper !== undefined) joint.limit.upper = Math.min(joint.limit.upper, overrides.upper)
-      }
+    for (const [name, ov] of Object.entries(COLLISION_OVERRIDES)) {
+      const j = robot.joints?.[name]
+      if (!j?.limit) continue
+      if (ov.lower !== undefined) j.limit.lower = Math.max(j.limit.lower, ov.lower)
+      if (ov.upper !== undefined) j.limit.upper = Math.min(j.limit.upper, ov.upper)
     }
 
     groupRef.current.updateMatrixWorld(true)
@@ -165,10 +159,8 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
 
     return () => {
       groupRef.current?.remove(robot)
-      if (physicsRef.current) {
-        physicsRef.current.dispose()
-        physicsRef.current = null
-      }
+      physicsRef.current?.dispose()
+      physicsRef.current = null
     }
   }, [robot, world, rapier])
 
@@ -176,6 +168,8 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
     if (!robot?.links?.head_link) return
     robot.links.head_link.visible = vrMode !== 'locked'
   }, [robot, vrMode])
+
+  // ── Physics sync ─────────────────────────────────────────────────────────
 
   useBeforePhysicsStep(() => {
     if (!robot || !physicsRef.current) return
@@ -185,46 +179,21 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
 
   useAfterPhysicsStep(() => {
     if (!physicsRef.current) return
-    const sides = physicsRef.current.checkCollisions()
-    collisionRef.current.left = sides.left
-    collisionRef.current.right = sides.right
+    const c = physicsRef.current.checkCollisions()
+    collision.current.left = c.left
+    collision.current.right = c.right
   })
 
-  useFrame((state, delta, xrFrame) => {
+  // ── Main frame loop ──────────────────────────────────────────────────────
+
+  useFrame((_state, _delta, xrFrame) => {
     if (!robot || !groupRef.current) return
 
-    const mode = modeRef.current
     const eyeLink = robot.links?.[EYE_LINK] || robot.links?.[EYE_LINK_FALLBACK]
 
     if (xrFrame && !calibrated.current && eyeLink) {
-      if (mode === 'locked' && worldRef?.current) {
-        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
-        worldRef.current.rotation.y = euler.y
-
-        worldRef.current.updateMatrixWorld(true)
-        eyeLink.getWorldPosition(_eyeWorldPos)
-
-        worldRef.current.position.x += camera.position.x - _eyeWorldPos.x
-        worldRef.current.position.y += camera.position.y - _eyeWorldPos.y
-        worldRef.current.position.z += camera.position.z - _eyeWorldPos.z
-
-        calibrated.current = true
-
-      } else {
-        const savedY = groupRef.current.position.y
-
-        const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
-        groupRef.current.rotation.y = euler.y
-
-        groupRef.current.updateMatrixWorld(true)
-        eyeLink.getWorldPosition(_eyeWorldPos)
-
-        groupRef.current.position.x += camera.position.x - _eyeWorldPos.x
-        groupRef.current.position.z += camera.position.z - _eyeWorldPos.z
-        groupRef.current.position.y = savedY
-
-        calibrated.current = true
-      }
+      calibrateView(modeRef.current, camera, groupRef, worldRef, eyeLink)
+      calibrated.current = true
     }
 
     if (!xrFrame) return
@@ -237,111 +206,131 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
       const side = source.handedness
       if (side !== 'left' && side !== 'right') continue
 
-      const xrJoints = {}
-      for (const name of XR_JOINT_NAMES) {
-        const space = source.hand.get(name)
-        if (!space) continue
-        const pose = xrFrame.getJointPose(space, refSpace)
-        if (!pose) continue
-        const p = pose.transform.position
-        const o = pose.transform.orientation
-        xrJoints[name] = {
-          position: new THREE.Vector3(p.x, p.y, p.z),
-          quaternion: new THREE.Quaternion(o.x, o.y, o.z, o.w),
-        }
-      }
-
-      const wristData = xrJoints['wrist']
-      if (!wristData) continue
+      const xrJoints = readXRJoints(xrFrame, source, refSpace)
+      if (!xrJoints['wrist']) continue
 
       const sm = side === 'left' ? smoothL.current : smoothR.current
-      const smoothPos = sm.pos.update(wristData.position)
-      const smoothQuat = sm.quat.update(wristData.quaternion)
+      _wristPos.copy(sm.pos.update(xrJoints['wrist'].position))
+      _wristQuat.copy(sm.quat.update(xrJoints['wrist'].quaternion))
 
-      _wristPos.copy(smoothPos)
-      _wristQuat.copy(smoothQuat)
-
-      const chainJoints = ARM_CHAIN[side].map(n => robot.joints?.[n]).filter(Boolean)
+      const chain = ARM_CHAIN[side].map(n => robot.joints?.[n]).filter(Boolean)
       const endLink = robot.links?.[HAND_LINK[side]]
 
-      if (chainJoints.length > 0 && endLink) {
-        const isColliding = collisionRef.current[side]
-
-        if (isColliding) {
-          const safe = safeAnglesRef.current[side]
-          chainJoints.forEach((j, idx) => {
-            if (j.setJointValue && idx < safe.length) {
-              const cur = j.angle || 0
-              j.setJointValue(cur + (safe[idx] - cur) * 0.5)
-            }
-          })
+      if (chain.length > 0 && endLink) {
+        if (collision.current[side]) {
+          blendToSafe(chain, safeAngles.current[side])
         } else {
-          solveCCDIK(chainJoints, endLink, _wristPos, _wristQuat, 20)
-
-          const jf = side === 'left' ? jointFilterL.current : jointFilterR.current
-          const solvedAngles = chainJoints.map(j => j.angle || 0)
-          const filtered = jf.addData(solvedAngles)
-          chainJoints.forEach((j, idx) => {
-            if (j.setJointValue && idx < filtered.length) {
-              j.setJointValue(filtered[idx])
-            }
-          })
-
-          const safe = safeAnglesRef.current[side]
-          chainJoints.forEach((j, idx) => {
-            if (idx < safe.length) safe[idx] = j.angle || 0
-          })
+          solveAndFilter(chain, endLink, _wristPos, _wristQuat,
+            side === 'left' ? jointFilterL.current : jointFilterR.current)
+          saveAngles(chain, safeAngles.current[side])
         }
       }
 
-      const rawData = retargetHand(xrJoints)
-      const retarget = side === 'left' ? retargetL.current : retargetR.current
-      const smoothed = retarget.update(rawData)
-      applyFingerAngles(robot, side, smoothed)
+      const raw = retargetHand(xrJoints)
+      const rt = side === 'left' ? retargetL.current : retargetR.current
+      applyFingerAngles(robot, side, rt.update(raw))
     }
   })
 
   return <group ref={groupRef} />
 }
 
+// ── Helpers ────────────────────────────────────────────────────────────────
+
+function calibrateView(mode, camera, groupRef, worldRef, eyeLink) {
+  const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
+
+  if (mode === 'locked' && worldRef?.current) {
+    worldRef.current.rotation.y = euler.y
+    worldRef.current.updateMatrixWorld(true)
+    eyeLink.getWorldPosition(_eyeWorld)
+    worldRef.current.position.x += camera.position.x - _eyeWorld.x
+    worldRef.current.position.y += camera.position.y - _eyeWorld.y
+    worldRef.current.position.z += camera.position.z - _eyeWorld.z
+  } else {
+    const savedY = groupRef.current.position.y
+    groupRef.current.rotation.y = euler.y
+    groupRef.current.updateMatrixWorld(true)
+    eyeLink.getWorldPosition(_eyeWorld)
+    groupRef.current.position.x += camera.position.x - _eyeWorld.x
+    groupRef.current.position.z += camera.position.z - _eyeWorld.z
+    groupRef.current.position.y = savedY
+  }
+}
+
+function readXRJoints(xrFrame, source, refSpace) {
+  const joints = {}
+  for (const name of XR_JOINT_NAMES) {
+    const space = source.hand.get(name)
+    if (!space) continue
+    const pose = xrFrame.getJointPose(space, refSpace)
+    if (!pose) continue
+    const p = pose.transform.position
+    const o = pose.transform.orientation
+    joints[name] = {
+      position: new THREE.Vector3(p.x, p.y, p.z),
+      quaternion: new THREE.Quaternion(o.x, o.y, o.z, o.w),
+    }
+  }
+  return joints
+}
+
+function solveAndFilter(chain, endLink, targetPos, targetQuat, filter) {
+  solveCCDIK(chain, endLink, targetPos, targetQuat, 20)
+  const solved = chain.map(j => j.angle || 0)
+  const filtered = filter.addData(solved)
+  chain.forEach((j, i) => {
+    if (j.setJointValue && i < filtered.length) j.setJointValue(filtered[i])
+  })
+}
+
+function blendToSafe(chain, safe) {
+  chain.forEach((j, i) => {
+    if (!j.setJointValue || i >= safe.length) return
+    j.setJointValue((j.angle || 0) + (safe[i] - (j.angle || 0)) * 0.5)
+  })
+}
+
+function saveAngles(chain, buf) {
+  chain.forEach((j, i) => { if (i < buf.length) buf[i] = j.angle || 0 })
+}
+
 function curlToAngle(joint, curl) {
   if (!joint?.limit) return 0
   const { lower, upper } = joint.limit
-  if (Math.abs(lower) > Math.abs(upper)) return lower * curl
-  return upper * curl
+  return Math.abs(lower) > Math.abs(upper) ? lower * curl : upper * curl
 }
 
 function applyFingerAngles(robot, side, data) {
   if (!robot.joints || !data) return
-  const prefix = side + '_hand_'
+  const p = side + '_hand_'
 
-  const thumbJ0 = robot.joints[prefix + 'thumb_0_joint']
-  if (thumbJ0?.limit) {
-    const abd = data.thumb.abduction
+  const t0 = robot.joints[p + 'thumb_0_joint']
+  if (t0?.limit) {
     const sign = side === 'left' ? 1 : -1
-    const range = Math.min(Math.abs(thumbJ0.limit.lower), Math.abs(thumbJ0.limit.upper))
-    thumbJ0.setJointValue(clamp(sign * abd * range, thumbJ0.limit.lower, thumbJ0.limit.upper))
+    const range = Math.min(Math.abs(t0.limit.lower), Math.abs(t0.limit.upper))
+    t0.setJointValue(clamp(sign * data.thumb.abduction * range, t0.limit.lower, t0.limit.upper))
   }
 
-  const thumbJ1 = robot.joints[prefix + 'thumb_1_joint']
-  const thumbJ2 = robot.joints[prefix + 'thumb_2_joint']
-  if (thumbJ1) thumbJ1.setJointValue(curlToAngle(thumbJ1, data.thumb.curl[0]))
-  if (thumbJ2) thumbJ2.setJointValue(curlToAngle(thumbJ2, data.thumb.curl[1]))
+  const t1 = robot.joints[p + 'thumb_1_joint']
+  const t2 = robot.joints[p + 'thumb_2_joint']
+  if (t1) t1.setJointValue(curlToAngle(t1, data.thumb.curl[0]))
+  if (t2) t2.setJointValue(curlToAngle(t2, data.thumb.curl[1]))
 
-  const indexJ0 = robot.joints[prefix + 'index_0_joint']
-  const indexJ1 = robot.joints[prefix + 'index_1_joint']
-  if (indexJ0) indexJ0.setJointValue(curlToAngle(indexJ0, data.index.curl[0]))
-  if (indexJ1) indexJ1.setJointValue(curlToAngle(indexJ1, data.index.curl[1]))
-
-  const middleJ0 = robot.joints[prefix + 'middle_0_joint']
-  const middleJ1 = robot.joints[prefix + 'middle_1_joint']
-  if (middleJ0) middleJ0.setJointValue(curlToAngle(middleJ0, data.middle.curl[0]))
-  if (middleJ1) middleJ1.setJointValue(curlToAngle(middleJ1, data.middle.curl[1]))
+  for (const finger of ['index', 'middle']) {
+    const j0 = robot.joints[p + finger + '_0_joint']
+    const j1 = robot.joints[p + finger + '_1_joint']
+    if (j0) j0.setJointValue(curlToAngle(j0, data[finger].curl[0]))
+    if (j1) j1.setJointValue(curlToAngle(j1, data[finger].curl[1]))
+  }
 }
+
+// ── Tracking HUD ──────────────────────────────────────────────────────────
 
 export function TrackingHUD() {
   const ref = useRef()
   const { gl } = useThree()
+
   useFrame((_, __, xrFrame) => {
     if (!xrFrame || !ref.current) return
     const session = gl.xr.getSession()
@@ -353,8 +342,9 @@ export function TrackingHUD() {
         if (src.handedness === 'right') r = true
       }
     }
-    ref.current.material?.color.set((l && r) ? '#00ff88' : (l || r) ? '#ffaa00' : '#ff4444')
+    ref.current.material?.color.set(l && r ? '#00ff88' : l || r ? '#ffaa00' : '#ff4444')
   })
+
   return (
     <mesh ref={ref} position={[0.28, -0.25, -0.5]}>
       <sphereGeometry args={[0.005, 6, 6]} />
