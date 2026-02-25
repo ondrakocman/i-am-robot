@@ -69,7 +69,7 @@ const _eyeWorld = new THREE.Vector3()
 const _wristPos = new THREE.Vector3()
 const _wristQuat = new THREE.Quaternion()
 const _correctedQuat = new THREE.Quaternion()
-const _footPos = new THREE.Vector3()
+
 
 export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
   const { gl, camera } = useThree()
@@ -142,15 +142,8 @@ export function URDFRobot({ vrMode = 'unlocked', worldRef }) {
       worldRef.current.rotation.set(0, 0, 0)
     }
 
+    groupRef.current.position.y = 0.75
     groupRef.current.updateMatrixWorld(true)
-
-    const foot = robot.links?.left_ankle_roll_link
-    if (foot) {
-      foot.getWorldPosition(_footPos)
-      groupRef.current.position.y = -_footPos.y + 0.015
-    } else {
-      groupRef.current.position.y = 0.75
-    }
 
     for (const [name, ov] of Object.entries(COLLISION_OVERRIDES)) {
       const j = robot.joints?.[name]
