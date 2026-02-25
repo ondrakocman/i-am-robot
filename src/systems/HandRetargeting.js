@@ -43,23 +43,16 @@ export function retargetHand(joints) {
   const indexTip  = get('index-finger-tip')
   const middleMeta = get('middle-finger-metacarpal')
 
-  // Thumb abduction + curl
-  if (wrist && thumbMeta && thumbProx && thumbDist && thumbTip && indexMeta) {
-    if (indexProx && middleMeta) {
-      const span = wrist.distanceTo(middleMeta)
-      if (span > 0.01) {
-        result.thumb.abduction = clamp((thumbProx.distanceTo(indexProx) / span - 0.75) / 0.35, -1, 1)
-      }
-    }
+  // Thumb abduction: angle between thumb bone and index bone directions
+  if (wrist && thumbMeta && thumbProx && thumbDist && thumbTip && indexMeta && indexProx) {
+    _v0.copy(thumbProx).sub(thumbMeta).normalize()
+    _v1.copy(indexProx).sub(indexMeta).normalize()
+    const angle = Math.acos(clamp(_v0.dot(_v1), -1, 1))
+    result.thumb.abduction = clamp((angle - 1.0) / 0.5, -1, 1)
 
-    const thumbLen = thumbMeta.distanceTo(thumbProx) + thumbProx.distanceTo(thumbDist) + thumbDist.distanceTo(thumbTip)
-    if (thumbLen > 0.01) {
-      const general = clamp(1 - thumbTip.distanceTo(wrist) / (thumbLen * 1.3), 0, 1)
-      const pinch = indexTip ? clamp(1 - thumbTip.distanceTo(indexTip) / 0.06, 0, 1) * 0.5 : 0
-      const curl = clamp(general + pinch, 0, 1)
-      result.thumb.curl[0] = curl
-      result.thumb.curl[1] = clamp(curl * 1.2, 0, 1)
-    }
+    // Thumb curl: direct joint bend measurement (×1.5 compensates for thumb's smaller flex range)
+    result.thumb.curl[0] = clamp(measureJointBend(thumbMeta, thumbProx, thumbDist) * 1.5, 0, 1)
+    result.thumb.curl[1] = clamp(measureJointBend(thumbProx, thumbDist, thumbTip) * 1.5, 0, 1)
   }
 
   // Index finger

@@ -3,8 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { XR_JOINT_NAMES } from '../constants/kinematics.js'
 
-const JOINTS_PER_HAND = XR_JOINT_NAMES.length
-const TOTAL = JOINTS_PER_HAND * 2
+const VISIBLE_JOINTS = 15 // wrist(1) + thumb(4) + index(5) + middle(5), skip ring & pinky
 const RADIUS = 0.006
 const WRIST_SCALE = 2.5
 
@@ -29,7 +28,7 @@ export function HandDebugPoints() {
 
     for (const mesh of [leftRef.current, rightRef.current]) {
       if (!mesh) continue
-      for (let i = 0; i < JOINTS_PER_HAND; i++) mesh.setMatrixAt(i, _hidden)
+      for (let i = 0; i < VISIBLE_JOINTS; i++) mesh.setMatrixAt(i, _hidden)
       mesh.instanceMatrix.needsUpdate = true
     }
 
@@ -40,7 +39,7 @@ export function HandDebugPoints() {
                  : null
       if (!mesh) continue
 
-      for (let i = 0; i < XR_JOINT_NAMES.length; i++) {
+      for (let i = 0; i < VISIBLE_JOINTS; i++) {
         const space = source.hand.get(XR_JOINT_NAMES[i])
         if (!space) continue
         const pose = xrFrame.getJointPose(space, refSpace)
@@ -59,11 +58,11 @@ export function HandDebugPoints() {
 
   return (
     <>
-      <instancedMesh ref={leftRef} args={[undefined, undefined, JOINTS_PER_HAND]} frustumCulled={false}>
+      <instancedMesh ref={leftRef} args={[undefined, undefined, VISIBLE_JOINTS]} frustumCulled={false}>
         <sphereGeometry args={[RADIUS, 8, 8]} />
         <meshBasicMaterial color="#00ddff" transparent opacity={0.7} depthTest={false} />
       </instancedMesh>
-      <instancedMesh ref={rightRef} args={[undefined, undefined, JOINTS_PER_HAND]} frustumCulled={false}>
+      <instancedMesh ref={rightRef} args={[undefined, undefined, VISIBLE_JOINTS]} frustumCulled={false}>
         <sphereGeometry args={[RADIUS, 8, 8]} />
         <meshBasicMaterial color="#ff8844" transparent opacity={0.7} depthTest={false} />
       </instancedMesh>
