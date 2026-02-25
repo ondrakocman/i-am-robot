@@ -272,7 +272,6 @@ function lockViewToEye(camera, worldRef, eyeLink) {
   worldRef.current.updateMatrixWorld(true)
   eyeLink.getWorldPosition(_eyeWorld)
   worldRef.current.position.x += camera.position.x - _eyeWorld.x
-  worldRef.current.position.y += camera.position.y - _eyeWorld.y
   worldRef.current.position.z += camera.position.z - _eyeWorld.z
 }
 

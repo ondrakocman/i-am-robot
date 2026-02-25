@@ -17,57 +17,58 @@ const SMOOTH_COST = 0.08
 const DAMPING = 0.4
 
 /**
- * CCD IK solver with position-dominant weighting, smooth cost,
- * regularization, and velocity limiting (inspired by xr_teleoperate).
+ * CCD IK with proximal/distal split weighting:
+ *   - Proximal joints (shoulder + elbow): position only
+ *   - Distal joints (wrist roll/pitch/yaw): orientation dominant, small position
+ *
+ * wristStartIdx: index of the first wrist joint in the chain (default 4 for 7-DoF arm)
  */
-export function solveCCDIK(joints, endEffector, targetPos, targetQuat, iterations = 20) {
+export function solveCCDIK(joints, endEffector, targetPos, targetQuat, iterations = 20, wristStartIdx = 4) {
   const n = joints.length
 
   for (let iter = 0; iter < iterations; iter++) {
     endEffector.getWorldPosition(_endPos)
     endEffector.getWorldQuaternion(_endQuat)
 
-    if (_endPos.distanceTo(targetPos) < 0.003 && _endQuat.angleTo(targetQuat) < 0.05) return
+    if (_endPos.distanceTo(targetPos) < 0.002 && _endQuat.angleTo(targetQuat) < 0.03) return
 
     for (let i = n - 1; i >= 0; i--) {
       const joint = joints[i]
       if (!joint.setJointValue) continue
 
-      // Position-heavy weighting: proximal joints focus on position,
-      // distal joints add orientation (~50:1 ratio from xr_teleoperate).
-      const t = n > 1 ? i / (n - 1) : 0
-      const posW = 1.0 - t * 0.6
-      const oriW = t * 0.15
+      const isWrist = i >= wristStartIdx
+      const posW = isWrist ? 0.05 : 1.0
+      const oriW = isWrist ? 1.0 : 0.0
 
       joint.getWorldQuaternion(_jointWorldQ)
       _worldAxis.copy(joint.axis).applyQuaternion(_jointWorldQ).normalize()
 
       let angle = 0
 
-      // Position contribution
-      endEffector.getWorldPosition(_endPos)
-      joint.getWorldPosition(_jointPos)
-      _toEnd.subVectors(_endPos, _jointPos)
-      _toTarget.subVectors(targetPos, _jointPos)
-      const le = _toEnd.length()
-      const lt = _toTarget.length()
+      if (posW > 0.001) {
+        endEffector.getWorldPosition(_endPos)
+        joint.getWorldPosition(_jointPos)
+        _toEnd.subVectors(_endPos, _jointPos)
+        _toTarget.subVectors(targetPos, _jointPos)
+        const le = _toEnd.length()
+        const lt = _toTarget.length()
 
-      if (le > 1e-6 && lt > 1e-6) {
-        _toEnd.divideScalar(le)
-        _toTarget.divideScalar(lt)
-        _cross.crossVectors(_toEnd, _toTarget)
-        const sinA = _cross.length()
-        const cosA = _toEnd.dot(_toTarget)
-        if (sinA > 1e-6) {
-          _cross.divideScalar(sinA)
-          const proj = _cross.dot(_worldAxis)
-          if (Math.abs(proj) > 0.01) {
-            angle += Math.atan2(sinA, cosA) * Math.sign(proj) * posW
+        if (le > 1e-6 && lt > 1e-6) {
+          _toEnd.divideScalar(le)
+          _toTarget.divideScalar(lt)
+          _cross.crossVectors(_toEnd, _toTarget)
+          const sinA = _cross.length()
+          const cosA = _toEnd.dot(_toTarget)
+          if (sinA > 1e-6) {
+            _cross.divideScalar(sinA)
+            const proj = _cross.dot(_worldAxis)
+            if (Math.abs(proj) > 0.01) {
+              angle += Math.atan2(sinA, cosA) * Math.sign(proj) * posW
+            }
           }
         }
       }
 
-      // Orientation contribution
       if (oriW > 0.001 && targetQuat) {
         endEffector.getWorldQuaternion(_endQuat)
         _deltaQuat.copy(_endQuat).invert().premultiply(targetQuat).normalize()
