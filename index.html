@@ -67,11 +67,31 @@
       font-weight: 400;
     }
 
-    #status {
+    #status, #sim-status {
       color: #ffffff66;
       font-size: 13px;
       letter-spacing: 0.04em;
     }
+
+    #episodes {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      pointer-events: all;
+      color: #ffffff99;
+      font-size: 13px;
+    }
+    #episodes[hidden] { display: none; }
+    .small-btn {
+      background: transparent;
+      color: #00d4ff;
+      border: 1px solid #00d4ff44;
+      border-radius: 6px;
+      padding: 6px 12px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .small-btn:disabled { opacity: 0.35; cursor: default; }
 
     #instructions {
       position: fixed;
@@ -100,6 +120,12 @@
       </button>
     </div>
     <span id="status">Quest 3 · Hand Tracking Required</span>
+    <span id="sim-status"></span>
+    <div id="episodes" hidden>
+      <span id="episode-count">No episodes recorded yet</span>
+      <button id="download-episodes" class="small-btn" disabled>Download</button>
+      <button id="clear-episodes" class="small-btn" disabled>Clear</button>
+    </div>
   </div>
   <div id="instructions">
     CONNECT TO: <strong style="color:#00d4ff88">https://YOUR_IP:5173</strong> on Meta Quest 3 Browser<br/>

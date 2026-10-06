@@ -3,10 +3,17 @@ import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
 import * as THREE from 'three'
 import { Scene } from './components/Scene.jsx'
+import { MujocoScene } from './components/MujocoScene.jsx'
+import { onEpisodesChanged, exportEpisodes, clearEpisodes } from './sim/episodeStore.js'
+
+// ?legacy = the original kinematic (Rapier) scene without the MuJoCo task
+const LEGACY = new URLSearchParams(location.search).has('legacy')
 
 const xrStore = createXRStore({
   hand: { model: false },
   controller: false,
+  // Desktop emulator (only injected on localhost): start in hand-tracking mode, the app ignores controllers
+  emulate: { primaryInputMode: 'hand' },
   foveation: 1,
   frameRate: 'high',
 })
@@ -53,6 +60,35 @@ export default function App() {
     }
   }, [])
 
+  useEffect(() => {
+    const row = document.getElementById('episodes')
+    if (LEGACY || !row) return
+    row.hidden = false
+    const count = document.getElementById('episode-count')
+    const download = document.getElementById('download-episodes')
+    const clear = document.getElementById('clear-episodes')
+    const unsubscribe = onEpisodesChanged(({ total, success }) => {
+      count.textContent = total ? `${total} episodes recorded (${success} successful)` : 'No episodes recorded yet'
+      download.disabled = clear.disabled = total === 0
+    })
+    const onDownload = async () => {
+      const url = URL.createObjectURL(await exportEpisodes())
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `tube_box_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
+      a.click()
+      setTimeout(() => URL.revokeObjectURL(url), 10000)
+    }
+    const onClear = () => { if (confirm('Delete all recorded episodes from this headset?')) clearEpisodes() }
+    download.addEventListener('click', onDownload)
+    clear.addEventListener('click', onClear)
+    return () => {
+      unsubscribe()
+      download.removeEventListener('click', onDownload)
+      clear.removeEventListener('click', onClear)
+    }
+  }, [])
+
   return (
     <Canvas
       style={{ position: 'fixed', inset: 0 }}
@@ -71,7 +107,7 @@ export default function App() {
     >
       <color attach="background" args={['#607080']} />
       <XR store={xrStore}>
-        <Scene vrMode={vrMode} />
+        {LEGACY ? <Scene vrMode={vrMode} /> : <MujocoScene vrMode={vrMode} />}
       </XR>
     </Canvas>
   )

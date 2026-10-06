@@ -1,0 +1,49 @@
+<!--
+  Tube-into-box task, modeled on Isaac Lab's PickPlace-FixedBaseUpperBodyIK-G1:
+  object on the robot's left, container on its right, success = object resting inside the container
+  with the hands pulled back. Robot faces +x, +y is the robot's left, z is up.
+-->
+<mujoco model="g1_tube_box">
+  <include file="g1_upper.xml"/>
+
+  <!-- timestep is overridden at load time by the app (?dt=...) -->
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10"/>
+
+  <asset>
+    <material name="floor" rgba="0.23 0.29 0.35 1"/>
+    <material name="table" rgba="0.55 0.41 0.08 1"/>
+    <material name="table_leg" rgba="0.42 0.29 0.08 1"/>
+    <material name="box" rgba="0.18 0.36 0.75 1"/>
+    <material name="tube" rgba="0.92 0.45 0.12 1"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" material="floor"/>
+
+    <!-- Table top at z=0.79, front edge 18 cm in front of the pelvis (the G1 arm only reaches ~35 cm forward) -->
+    <body name="table" pos="0.43 0 0">
+      <geom name="table_top" type="box" size="0.25 0.5 0.015" pos="0 0 0.775" material="table"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="0.21 0.46 0.38" material="table_leg"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="0.21 -0.46 0.38" material="table_leg"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="-0.21 0.46 0.38" material="table_leg"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="-0.21 -0.46 0.38" material="table_leg"/>
+    </body>
+
+    <!-- Open box (static). Interior 0.18 x 0.20, walls 7 cm high, sitting on the table top. -->
+    <body name="box" pos="0.32 -0.13 0.79">
+      <geom name="box_floor" type="box" size="0.1 0.11 0.005" pos="0 0 0.005" material="box"/>
+      <geom name="box_wall_front" type="box" size="0.005 0.11 0.035" pos="0.095 0 0.035" material="box"/>
+      <geom name="box_wall_back" type="box" size="0.005 0.11 0.035" pos="-0.095 0 0.035" material="box"/>
+      <geom name="box_wall_left" type="box" size="0.1 0.005 0.035" pos="0 0.105 0.035" material="box"/>
+      <geom name="box_wall_right" type="box" size="0.1 0.005 0.035" pos="0 -0.105 0.035" material="box"/>
+    </body>
+
+    <!-- Tube: 4.4 cm diameter, 14 cm long, 100 g. condim 6 adds torsional friction (pinches don't spin) and
+         rolling friction (a tube lying on its side stops instead of rolling off the table). -->
+    <body name="tube" pos="0.31 0.15 0.861">
+      <freejoint name="tube_free"/>
+      <geom name="tube" type="cylinder" size="0.022 0.07" mass="0.1" condim="6" friction="1 0.01 0.002"
+        material="tube"/>
+    </body>
+  </worldbody>
+</mujoco>

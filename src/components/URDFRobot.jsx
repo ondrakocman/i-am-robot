@@ -9,19 +9,12 @@ import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { ExponentialSmoother, QuaternionSmoother } from '../systems/ImpedanceControl.js'
 import { WeightedMovingFilter } from '../systems/WeightedMovingFilter.js'
 import { PhysicsManager } from '../systems/PhysicsManager.js'
-import { XR_JOINT_NAMES } from '../constants/kinematics.js'
+import { XR_JOINT_NAMES, ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
 
 function clamp(v, lo, hi) { return Math.max(lo, Math.min(hi, v)) }
 
 const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x4a4a6e, roughness: 0.4, metalness: 0.25 })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x6a6a9e, roughness: 0.35, metalness: 0.3 })
-
-const ROBOT_BASE_QUAT = new THREE.Quaternion()
-;(() => {
-  const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), -Math.PI / 2)
-  const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2)
-  ROBOT_BASE_QUAT.multiplyQuaternions(qy, qx)
-})()
 
 const ARM_CHAIN = {
   left: [
@@ -51,19 +44,6 @@ const COLLISION_OVERRIDES = {
 const EYE_LINK = 'mid360_link'
 const EYE_LINK_FALLBACK = 'head_link'
 const COLLISION_GRACE_FRAMES = 30
-
-// Frame correction: WebXR wrist has -Z=fingers, +Y=back-of-hand.
-// URDF palm has +X=fingers. Left palm faces -Y, right palm faces +Y
-// (confirmed by mirrored finger curl limits in the URDF).
-// Left:  Ry(π/2) aligns fingers (-Z→+X) and keeps Y axis.
-// Right: Rz(π)·Ry(π/2) also flips the palm normal axis.
-const XR_TO_URDF_L = new THREE.Quaternion().setFromAxisAngle(
-  new THREE.Vector3(0, 1, 0), Math.PI / 2
-)
-const XR_TO_URDF_R = new THREE.Quaternion().multiplyQuaternions(
-  new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 0, 1), Math.PI),
-  new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 2),
-)
 
 const _eyeWorld = new THREE.Vector3()
 const _wristPos = new THREE.Vector3()
