@@ -12,12 +12,16 @@ import { saveEpisode, onEpisodesChanged } from '../sim/episodeStore.js'
 const params = new URLSearchParams(location.search)
 const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 
-// Real G1 colors: dark grey shell, silver joint housings, rubber finger pads
-const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x2e3036, roughness: 0.55, metalness: 0.3 })
-const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0xaeb3ba, roughness: 0.35, metalness: 0.85 })
+// G1 colors as assigned in Unitree's own URDF: light grey shell ("white" 0.7) everywhere except the pelvis,
+// hip-pitch housings, feet, head and logo ("dark" 0.2). Rubber pads on the distal finger links are ours.
+const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0xb6b8bb, roughness: 0.5, metalness: 0.35 })
+const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3 })
 const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0 })
-const ACCENT_MESH = /contour|shoulder_roll|shoulder_pitch|waist|logo/
+const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$/
+const DARK_MESH = /^(head_link|logo_link)$/
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
+// Visible room around the robot (robot frame: x forward, z up); visual only, nothing collides with it
+const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.45], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.89] }
 const SHADOW_CASTER_BODY = /elbow|wrist|hand/
 const SCENE_MATERIALS = {
   floor: { roughness: 0.95 },
@@ -157,7 +161,6 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
     <>
       <hemisphereLight skyColor="#c8d8e8" groundColor="#4a4540" intensity={0.9} />
       <group ref={worldRef}>
-        <gridHelper args={[30, 60, '#5588aa', '#445566']} position={[0, 0.001, 0]} />
         {world && <primitive object={world.root} />}
       </group>
       {world && <primitive object={world.ghostGroup} />}
@@ -197,7 +200,7 @@ function buildWorld({ scene, eye, task }) {
     } else {
       const hand = bodyName.startsWith('left_hand_') || bodyName === 'left_wrist_yaw_link' ? 0
         : bodyName.startsWith('right_hand_') || bodyName === 'right_wrist_yaw_link' ? 1 : -1
-      const kind = PAD_BODY.test(bodyName) ? 2 : ACCENT_MESH.test(meshName) ? 1 : 0
+      const kind = PAD_BODY.test(bodyName) ? 2 : DARK_BODY.test(bodyName) || DARK_MESH.test(meshName) ? 1 : 0
       material = hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
     }
     const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache), material)
@@ -227,6 +230,21 @@ function buildWorld({ scene, eye, task }) {
   fill.position.set(1.5, -1.5, 1.8)
   fill.target.position.set(0.45, 0, 0.8)
   root.add(fill, fill.target)
+
+  const room = new THREE.Mesh(
+    new THREE.BoxGeometry(...ROOM.size),
+    new THREE.MeshStandardMaterial({ color: ROOM.wall, roughness: 0.9, metalness: 0, side: THREE.BackSide }),
+  )
+  room.position.fromArray(ROOM.center)
+  room.receiveShadow = true
+  root.add(room)
+  const panel = new THREE.Mesh(
+    new THREE.PlaneGeometry(1.2, 0.6),
+    new THREE.MeshBasicMaterial({ color: 0xfff8ee, toneMapped: false }),
+  )
+  panel.position.fromArray(ROOM.lightPanel)
+  panel.rotation.x = Math.PI // face down
+  root.add(panel)
 
   const ghostGroup = new THREE.Group()
   const ghosts = [makeGhostHand(), makeGhostHand()]

@@ -19,7 +19,7 @@
   </default>
 
   <asset>
-    <material name="floor" rgba="0.26 0.29 0.33 1"/>
+    <material name="floor" rgba="0.42 0.42 0.44 1"/>
     <material name="table" rgba="0.45 0.35 0.26 1"/>
     <material name="table_leg" rgba="0.3 0.24 0.19 1"/>
     <material name="box" rgba="0.2 0.36 0.62 1"/>
