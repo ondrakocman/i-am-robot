@@ -6,7 +6,7 @@
     <default class="g1">
       <site rgba="1 0 0 1" size="0.01" group="5" />
       <joint armature="0.01" frictionloss="0.3" />
-      <position kp="500" dampratio="1" inheritrange="1" />
+      <position inheritrange="1" />
       <default class="visual">
         <geom group="2" type="mesh" contype="0" conaffinity="0" density="0" material="metal" />
       </default>
@@ -328,37 +328,37 @@
     </body>
   </worldbody>
   <actuator>
-    <position class="g1" name="waist_yaw_joint" joint="waist_yaw_joint" />
-    <position class="g1" name="waist_roll_joint" joint="waist_roll_joint" />
-    <position class="g1" name="waist_pitch_joint" joint="waist_pitch_joint" />
-    <position class="g1" name="left_shoulder_pitch_joint" joint="left_shoulder_pitch_joint" />
-    <position class="g1" name="left_shoulder_roll_joint" joint="left_shoulder_roll_joint" />
-    <position class="g1" name="left_shoulder_yaw_joint" joint="left_shoulder_yaw_joint" />
-    <position class="g1" name="left_elbow_joint" joint="left_elbow_joint" />
-    <position class="g1" name="left_wrist_roll_joint" joint="left_wrist_roll_joint" />
-    <position class="g1" name="left_wrist_pitch_joint" joint="left_wrist_pitch_joint" />
-    <position class="g1" name="left_wrist_yaw_joint" joint="left_wrist_yaw_joint" />
-    <position class="g1" name="left_hand_thumb_0_joint" joint="left_hand_thumb_0_joint" />
-    <position class="g1" name="left_hand_thumb_1_joint" joint="left_hand_thumb_1_joint" />
-    <position class="g1" name="left_hand_thumb_2_joint" joint="left_hand_thumb_2_joint" />
-    <position class="g1" name="left_hand_middle_0_joint" joint="left_hand_middle_0_joint" />
-    <position class="g1" name="left_hand_middle_1_joint" joint="left_hand_middle_1_joint" />
-    <position class="g1" name="left_hand_index_0_joint" joint="left_hand_index_0_joint" />
-    <position class="g1" name="left_hand_index_1_joint" joint="left_hand_index_1_joint" />
-    <position class="g1" name="right_shoulder_pitch_joint" joint="right_shoulder_pitch_joint" />
-    <position class="g1" name="right_shoulder_roll_joint" joint="right_shoulder_roll_joint" />
-    <position class="g1" name="right_shoulder_yaw_joint" joint="right_shoulder_yaw_joint" />
-    <position class="g1" name="right_elbow_joint" joint="right_elbow_joint" />
-    <position class="g1" name="right_wrist_roll_joint" joint="right_wrist_roll_joint" />
-    <position class="g1" name="right_wrist_pitch_joint" joint="right_wrist_pitch_joint" />
-    <position class="g1" name="right_wrist_yaw_joint" joint="right_wrist_yaw_joint" />
-    <position class="g1" name="right_hand_thumb_0_joint" joint="right_hand_thumb_0_joint" />
-    <position class="g1" name="right_hand_thumb_1_joint" joint="right_hand_thumb_1_joint" />
-    <position class="g1" name="right_hand_thumb_2_joint" joint="right_hand_thumb_2_joint" />
-    <position class="g1" name="right_hand_index_0_joint" joint="right_hand_index_0_joint" />
-    <position class="g1" name="right_hand_index_1_joint" joint="right_hand_index_1_joint" />
-    <position class="g1" name="right_hand_middle_0_joint" joint="right_hand_middle_0_joint" />
-    <position class="g1" name="right_hand_middle_1_joint" joint="right_hand_middle_1_joint" />
+    <position class="g1" name="waist_yaw_joint" joint="waist_yaw_joint" kp="300" kv="3" />
+    <position class="g1" name="waist_roll_joint" joint="waist_roll_joint" kp="300" kv="3" />
+    <position class="g1" name="waist_pitch_joint" joint="waist_pitch_joint" kp="300" kv="3" />
+    <position class="g1" name="left_shoulder_pitch_joint" joint="left_shoulder_pitch_joint" kp="80" kv="3" />
+    <position class="g1" name="left_shoulder_roll_joint" joint="left_shoulder_roll_joint" kp="80" kv="3" />
+    <position class="g1" name="left_shoulder_yaw_joint" joint="left_shoulder_yaw_joint" kp="80" kv="3" />
+    <position class="g1" name="left_elbow_joint" joint="left_elbow_joint" kp="80" kv="3" />
+    <position class="g1" name="left_wrist_roll_joint" joint="left_wrist_roll_joint" kp="40" kv="1.5" />
+    <position class="g1" name="left_wrist_pitch_joint" joint="left_wrist_pitch_joint" kp="40" kv="1.5" />
+    <position class="g1" name="left_wrist_yaw_joint" joint="left_wrist_yaw_joint" kp="40" kv="1.5" />
+    <position class="g1" name="left_hand_thumb_0_joint" joint="left_hand_thumb_0_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="left_hand_thumb_1_joint" joint="left_hand_thumb_1_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="left_hand_thumb_2_joint" joint="left_hand_thumb_2_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="left_hand_middle_0_joint" joint="left_hand_middle_0_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="left_hand_middle_1_joint" joint="left_hand_middle_1_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="left_hand_index_0_joint" joint="left_hand_index_0_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="left_hand_index_1_joint" joint="left_hand_index_1_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_shoulder_pitch_joint" joint="right_shoulder_pitch_joint" kp="80" kv="3" />
+    <position class="g1" name="right_shoulder_roll_joint" joint="right_shoulder_roll_joint" kp="80" kv="3" />
+    <position class="g1" name="right_shoulder_yaw_joint" joint="right_shoulder_yaw_joint" kp="80" kv="3" />
+    <position class="g1" name="right_elbow_joint" joint="right_elbow_joint" kp="80" kv="3" />
+    <position class="g1" name="right_wrist_roll_joint" joint="right_wrist_roll_joint" kp="40" kv="1.5" />
+    <position class="g1" name="right_wrist_pitch_joint" joint="right_wrist_pitch_joint" kp="40" kv="1.5" />
+    <position class="g1" name="right_wrist_yaw_joint" joint="right_wrist_yaw_joint" kp="40" kv="1.5" />
+    <position class="g1" name="right_hand_thumb_0_joint" joint="right_hand_thumb_0_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_hand_thumb_1_joint" joint="right_hand_thumb_1_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_hand_thumb_2_joint" joint="right_hand_thumb_2_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_hand_index_0_joint" joint="right_hand_index_0_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_hand_index_1_joint" joint="right_hand_index_1_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_hand_middle_0_joint" joint="right_hand_middle_0_joint" kp="1.5" kv="0.2" />
+    <position class="g1" name="right_hand_middle_1_joint" joint="right_hand_middle_1_joint" kp="1.5" kv="0.2" />
   </actuator>
   <sensor>
     <gyro name="imu-torso-angular-velocity" site="imu_in_torso" noise="5e-4" cutoff="34.9" />

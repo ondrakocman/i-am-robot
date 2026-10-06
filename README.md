@@ -31,9 +31,20 @@ python3 scripts/load_episodes.py episodes.iamr
 
 Per episode, at 50 Hz: `action` (the 31 actuator targets: waist, 2x7 arm, 2x7 hand), `qpos`/`qvel` (full sim
 state including the tube), `input` (retargeted operator command), `raw` (head pose + all 25 WebXR joints per hand),
-`touching`. The header holds the layout, seed, outcome, joint/actuator names and `initial_qpos`. Each episode
-replays bit-for-bit from `initial_qpos` + the logged actions with the same MuJoCo build, so camera images can be
-rendered afterwards.
+`touching`. The header holds the layout, seed, outcome, joint/actuator names, `initial_qpos`, the randomized
+`physics` (tube mass 0.2–0.4 kg, friction 0.5–0.9), `peak_arm_velocity` and `flags` (`fast_motion` above 6 rad/s).
+Each episode replays bit-for-bit from `initial_qpos` + `physics` + the logged actions with the same MuJoCo build,
+so camera images can be rendered afterwards.
+
+### Fidelity choices
+
+- Joint PD gains are the ones Unitree's own teleop stack ([xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate))
+  sends to the real G1: shoulder/elbow kp=80 kd=3, wrist kp=40 kd=1.5, waist kp=300 kd=3, Dex3 kp=1.5 kd=0.2.
+  Actuator force limits come from Unitree's model via MuJoCo Menagerie. Gravity is compensated on the arms.
+- Anti-windup: the commanded joint target may lead the measured joint by at most 0.12 rad, so a hand blocked by
+  the table pushes with a bounded force and does not whip when it comes free.
+- Contacts on the tube, table and box use `solref="0.01 1"` (stiffer than MuJoCo's default 0.02), valid for all
+  supported timesteps (`?dt=` up to 0.005).
 
 ### Development
 

@@ -9,6 +9,15 @@
   <!-- timestep is overridden at load time by the app (?dt=...) -->
   <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10"/>
 
+  <!-- Stiffer-than-default contacts on everything the hands touch (MuJoCo default timeconst is 0.02 s, which
+       lets fingers sink a few mm into objects). 0.01 s keeps the required timeconst >= 2*timestep for every
+       timestep the app allows (up to 5 ms). priority=1 makes these win over the robot's default geoms. -->
+  <default>
+    <default class="touchable">
+      <geom solref="0.01 1" priority="1"/>
+    </default>
+  </default>
+
   <asset>
     <material name="floor" rgba="0.26 0.29 0.33 1"/>
     <material name="table" rgba="0.45 0.35 0.26 1"/>
@@ -22,7 +31,7 @@
 
     <!-- Table top at z=0.79, front edge 18 cm in front of the pelvis (the G1 arm only reaches ~35 cm forward) -->
     <body name="table" pos="0.43 0 0">
-      <geom name="table_top" type="box" size="0.25 0.5 0.015" pos="0 0 0.775" material="table"/>
+      <geom name="table_top" class="touchable" type="box" size="0.25 0.5 0.015" pos="0 0 0.775" material="table"/>
       <geom type="box" size="0.02 0.02 0.38" pos="0.21 0.46 0.38" material="table_leg"/>
       <geom type="box" size="0.02 0.02 0.38" pos="0.21 -0.46 0.38" material="table_leg"/>
       <geom type="box" size="0.02 0.02 0.38" pos="-0.21 0.46 0.38" material="table_leg"/>
@@ -31,11 +40,11 @@
 
     <!-- Open box (static). Interior 0.18 x 0.20, walls 7 cm high, sitting on the table top. -->
     <body name="box" pos="0.32 -0.13 0.79">
-      <geom name="box_floor" type="box" size="0.1 0.11 0.005" pos="0 0 0.005" material="box"/>
-      <geom name="box_wall_front" type="box" size="0.005 0.11 0.035" pos="0.095 0 0.035" material="box"/>
-      <geom name="box_wall_back" type="box" size="0.005 0.11 0.035" pos="-0.095 0 0.035" material="box"/>
-      <geom name="box_wall_left" type="box" size="0.1 0.005 0.035" pos="0 0.105 0.035" material="box"/>
-      <geom name="box_wall_right" type="box" size="0.1 0.005 0.035" pos="0 -0.105 0.035" material="box"/>
+      <geom name="box_floor" class="touchable" type="box" size="0.1 0.11 0.005" pos="0 0 0.005" material="box"/>
+      <geom name="box_wall_front" class="touchable" type="box" size="0.005 0.11 0.035" pos="0.095 0 0.035" material="box"/>
+      <geom name="box_wall_back" class="touchable" type="box" size="0.005 0.11 0.035" pos="-0.095 0 0.035" material="box"/>
+      <geom name="box_wall_left" class="touchable" type="box" size="0.1 0.005 0.035" pos="0 0.105 0.035" material="box"/>
+      <geom name="box_wall_right" class="touchable" type="box" size="0.1 0.005 0.035" pos="0 -0.105 0.035" material="box"/>
     </body>
 
     <!-- Steel tube: 44 mm outer diameter, 2 mm wall, 14 cm long -> 0.30 kg with hollow-cylinder inertia.
@@ -45,7 +54,7 @@
     <body name="tube" pos="0.31 0.15 0.861">
       <freejoint name="tube_free"/>
       <inertial pos="0 0 0" mass="0.3" diaginertia="5.56e-4 5.56e-4 1.33e-4"/>
-      <geom name="tube" type="cylinder" size="0.022 0.07" condim="6" friction="0.7 0.01 0.002" material="tube"/>
+      <geom name="tube" class="touchable" type="cylinder" size="0.022 0.07" condim="6" friction="0.7 0.01 0.002" material="tube"/>
     </body>
   </worldbody>
 </mujoco>

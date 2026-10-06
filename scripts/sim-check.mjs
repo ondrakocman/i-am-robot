@@ -31,7 +31,7 @@ const ms = (performance.now() - t0) / steps
 console.log(`${steps} steps, ${ms.toFixed(3)} ms/step (${(ms / (sim.dt * 1000) * 100).toFixed(0)}% of real time on one core)`)
 for (const e of episodes) {
   const h = e.header
-  console.log(`episode ${h.episode}: ${h.outcome} after ${h.duration.toFixed(2)} s, ${h.frames} frames, tube start ${h.layout.tube.map(v => v.toFixed(3))}`)
+  console.log(`episode ${h.episode}: ${h.outcome} after ${h.duration.toFixed(2)} s, ${h.frames} frames, tube ${h.physics.tube_mass.toFixed(2)} kg mu ${h.physics.tube_friction.toFixed(2)}, peak arm ${h.peak_arm_velocity.toFixed(1)} rad/s${h.flags.length ? ' FLAGS ' + h.flags : ''}`)
 }
 
 // Replay check: initial qpos + logged float32 actions must reproduce the logged qpos exactly
@@ -40,6 +40,7 @@ if (e) {
   const { header, frames } = e
   const f = Object.fromEntries(header.fields.map(x => [x.name, x]))
   const d = new mj.MjData(m)
+  sim.setPhysics(header.physics)
   d.qpos.set(header.initial_qpos)
   const q32 = new Float32Array(header.nq)
   let mismatch = -1

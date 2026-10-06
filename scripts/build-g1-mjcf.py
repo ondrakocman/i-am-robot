@@ -7,6 +7,8 @@ Changes vs. the Menagerie model (BSD-3, see public/mujoco/LICENSE-g1):
   - fixed base: pelvis freejoint removed (upper-body manipulation, like Isaac's FixedBaseUpperBodyIK task)
   - legs kept as static visuals (joints, collision geoms and actuators removed)
   - gravity compensation on arm + hand bodies (the real arm controller adds a gravity feed-forward)
+  - actuator PD gains set to what Unitree's own teleop stack (xr_teleoperate) sends to the real robot:
+    shoulder/elbow kp=80 kd=3, wrist kp=40 kd=1.5, waist kp=300 kd=3, Dex3 fingers kp=1.5 kd=0.2
   - sites: eye (mid360 origin, used for VR calibration), head_cam (d435), {left,right}_palm (IK target),
     {left,right}_grip (center of the grasp, used by task checks)
   - meshdir points at the shared mesh folder (public/models/meshes)
@@ -58,6 +60,27 @@ for name, body in bodies.items():
     if ARM_ROOT.fullmatch(name):
         for b in body.iter('body'):
             b.set('gravcomp', '1')
+
+
+# Joint-level PD gains from unitreerobotics/xr_teleoperate (robot_arm.py, robot_hand_unitree.py); MuJoCo's
+# position actuator is tau = kp (q_des - q) - kv dq, i.e. the same law with dq_des = 0.
+GAINS = [
+    (re.compile(r'_hand_'), 1.5, 0.2),
+    (re.compile(r'_wrist_'), 40, 1.5),
+    (re.compile(r'shoulder|elbow'), 80, 3),
+    (re.compile(r'waist'), 300, 3),
+]
+for pos in root.find('default').iter('position'):
+    for k in ('kp', 'dampratio'):
+        pos.attrib.pop(k, None)
+for act in root.find('actuator'):
+    for pat, kp, kv in GAINS:
+        if pat.search(act.get('name', '')):
+            act.set('kp', str(kp))
+            act.set('kv', str(kv))
+            break
+    else:
+        raise SystemExit(f"no gains for actuator {act.get('name')}")
 
 
 def site(parent, name, pos, **extra):

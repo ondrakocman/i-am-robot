@@ -33,6 +33,11 @@ export const TASK = {
   resetButton: [0.18, 0.36, 1.06],
   resetRadius: 0.06,
   resetHold: 0.6,
+  // Physics randomization per episode (logged in the header)
+  tubeMassRange: [0.2, 0.4],      // kg
+  tubeFrictionRange: [0.5, 0.9],
+  // Episodes whose arm joints exceed this are flagged 'fast_motion' (normal teleop stays < 3 rad/s)
+  fastMotion: 6,                  // rad/s
 }
 
 // Start posture: hands raised near the chest, clear of the objects (grip ~(0.22, +-0.13, 1.03))
@@ -48,6 +53,10 @@ const POSTURE = {
 const MIRRORED = new Set(['shoulder_roll', 'shoulder_yaw', 'wrist_roll', 'wrist_yaw'])
 // Joint speed limits applied to the commanded targets (rad/s)
 const ARM_SPEED = [3, 3, 3, 3, 5, 5, 5]
+// Anti-windup: the commanded target may lead the measured joint by at most this much (rad). When the hand
+// is blocked by contact the target stops running ahead, so the motor pushes with a bounded force and the
+// arm doesn't whip when it comes free. With kp=80 this caps the extra torque at ~10 Nm (wrist kp=40: ~5 Nm).
+const ARM_LEAD = 0.12
 
 function mulberry32(seed) {
   let a = seed >>> 0
@@ -69,7 +78,8 @@ export class TubeBoxSim {
    * @param opts.onEpisode  called with { header, frames: Float32Array } whenever an episode ends
    * @param opts.autopilot  drive the left hand with a scripted pick-and-place (testing / desktop demo)
    */
-  constructor(mj, m, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {} } = {}) {
+  constructor(mj, m, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {}, armLead = ARM_LEAD } = {}) {
+    this.armLead = armLead
     this.mj = mj
     this.m = m
     this.d = new mj.MjData(m)
@@ -94,6 +104,8 @@ export class TubeBoxSim {
 
     this.tubeBody = id('mjOBJ_BODY', 'tube')
     this.tubeGeom = id('mjOBJ_GEOM', 'tube')
+    this.tubeMass0 = m.body_mass[this.tubeBody]
+    this.tubeInertia0 = Array.from(m.body_inertia.slice(3 * this.tubeBody, 3 * this.tubeBody + 3))
     const tubeJnt = id('mjOBJ_JOINT', 'tube_free')
     this.tubeQ = m.jnt_qposadr[tubeJnt]
     this.tubeV = m.jnt_dofadr[tubeJnt]
@@ -142,6 +154,7 @@ export class TubeBoxSim {
     }
     this.actuatorNames = Array.from({ length: m.nu }, (_, a) => this.name('mjOBJ_ACTUATOR', a))
 
+    this.armDof = this.arms.flatMap(a => Array.from(a.ik.jnt, j => m.jnt_dofadr[j]))
     this.input = new Float32Array(INPUT_SIZE)
     this.raw = new Float32Array(RAW_SIZE)
     this.autoInput = new Float32Array(INPUT_SIZE)
@@ -173,8 +186,10 @@ export class TubeBoxSim {
     this.episode++
     const rng = mulberry32(this.seed + this.episode * 9973)
     const jitter = () => (rng() * 2 - 1) * TASK.tubeJitter
+    const uniform = ([lo, hi]) => lo + (hi - lo) * rng()
 
     mj.mj_resetData(m, d)
+    this.setPhysics({ tube_mass: uniform(TASK.tubeMassRange), tube_friction: uniform(TASK.tubeFrictionRange) })
     for (const arm of this.arms) {
       for (let k = 0; k < arm.qCmd.length; k++) {
         arm.qCmd[k] = arm.ready[k]
@@ -190,6 +205,7 @@ export class TubeBoxSim {
     const b = 3 * this.boxBody
     this.layout = { tube, box: [m.body_pos[b], m.body_pos[b + 1], m.body_pos[b + 2]] }
     this.initialQpos = Array.from(d.qpos)
+    this.peakArmVel = 0
     this.status = 'waiting' // until the operator's hands show up
     this.steps = 0
     this.startTime = 0
@@ -199,6 +215,17 @@ export class TubeBoxSim {
     this.pendingReset = false
     this.recorder.clear()
     this.autoReady = null
+  }
+
+  /** Applies randomized object properties; also used to restore them for replay. */
+  setPhysics({ tube_mass, tube_friction }) {
+    const { mj, m, d } = this
+    const scale = tube_mass / this.tubeMass0
+    m.body_mass[this.tubeBody] = tube_mass
+    for (let k = 0; k < 3; k++) m.body_inertia[3 * this.tubeBody + k] = this.tubeInertia0[k] * scale
+    m.geom_friction[3 * this.tubeGeom] = tube_friction
+    mj.mj_setConst(m, d)
+    this.physics = { tube_mass, tube_friction }
   }
 
   /**
@@ -235,6 +262,8 @@ export class TubeBoxSim {
         for (let k = 0; k < qadr.length; k++) {
           const lim = ARM_SPEED[k] * this.controlDt
           arm.qCmd[k] += Math.max(-lim, Math.min(lim, q[qadr[k]] - arm.qCmd[k]))
+          const actual = d.qpos[qadr[k]]
+          arm.qCmd[k] = Math.max(actual - this.armLead, Math.min(actual + this.armLead, arm.qCmd[k]))
         }
         for (let k = 0; k < FINGER_JOINTS.length; k++) arm.fingerCmd[k] = this.fingerTarget(arm, k, input[o + 8 + k])
       }
@@ -245,6 +274,7 @@ export class TubeBoxSim {
 
     this.updateTask()
     if (this.status === 'running') {
+      for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
       this.recorder.push([d.time - this.startTime, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
     }
   }
@@ -324,6 +354,9 @@ export class TubeBoxSim {
         control_hz: 1 / this.controlDt,
         steps_per_control: this.stepsPerControl,
         layout: this.layout,
+        physics: this.physics,
+        peak_arm_velocity: this.peakArmVel,
+        flags: this.peakArmVel > TASK.fastMotion ? ['fast_motion'] : [],
         initial_qpos: this.initialQpos,
         nq: m.nq, nv: m.nv, nu: m.nu,
         qpos_names: this.qposNames,
