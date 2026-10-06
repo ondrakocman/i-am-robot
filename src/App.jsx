@@ -96,8 +96,9 @@ export default function App() {
         antialias: true,
         alpha: false,
         powerPreference: 'high-performance',
-        toneMapping: THREE.NoToneMapping,
+        toneMapping: LEGACY ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping,
       }}
+      shadows={LEGACY ? false : 'percentage'}
       camera={{
         fov: 75,
         near: 0.01,

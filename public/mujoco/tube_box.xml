@@ -10,11 +10,11 @@
   <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10"/>
 
   <asset>
-    <material name="floor" rgba="0.23 0.29 0.35 1"/>
-    <material name="table" rgba="0.55 0.41 0.08 1"/>
-    <material name="table_leg" rgba="0.42 0.29 0.08 1"/>
-    <material name="box" rgba="0.18 0.36 0.75 1"/>
-    <material name="tube" rgba="0.92 0.45 0.12 1"/>
+    <material name="floor" rgba="0.26 0.29 0.33 1"/>
+    <material name="table" rgba="0.45 0.35 0.26 1"/>
+    <material name="table_leg" rgba="0.3 0.24 0.19 1"/>
+    <material name="box" rgba="0.2 0.36 0.62 1"/>
+    <material name="tube" rgba="0.72 0.73 0.75 1"/>
   </asset>
 
   <worldbody>
@@ -38,12 +38,14 @@
       <geom name="box_wall_right" type="box" size="0.1 0.005 0.035" pos="0 -0.105 0.035" material="box"/>
     </body>
 
-    <!-- Tube: 4.4 cm diameter, 14 cm long, 100 g. condim 6 adds torsional friction (pinches don't spin) and
-         rolling friction (a tube lying on its side stops instead of rolling off the table). -->
+    <!-- Steel tube: 44 mm outer diameter, 2 mm wall, 14 cm long -> 0.30 kg with hollow-cylinder inertia.
+         Collision is the solid cylinder (a convex hull would fill the bore anyway). Steel on rubber pads
+         mu~0.7; condim 6 adds torsional friction (pinches don't spin) and rolling friction (a tube lying on
+         its side stops instead of rolling off the table). -->
     <body name="tube" pos="0.31 0.15 0.861">
       <freejoint name="tube_free"/>
-      <geom name="tube" type="cylinder" size="0.022 0.07" mass="0.1" condim="6" friction="1 0.01 0.002"
-        material="tube"/>
+      <inertial pos="0 0 0" mass="0.3" diaginertia="5.56e-4 5.56e-4 1.33e-4"/>
+      <geom name="tube" type="cylinder" size="0.022 0.07" condim="6" friction="0.7 0.01 0.002" material="tube"/>
     </body>
   </worldbody>
 </mujoco>

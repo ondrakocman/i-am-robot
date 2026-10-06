@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
+import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { QuaternionSmoother } from '../systems/ImpedanceControl.js'
 import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
@@ -11,11 +12,29 @@ import { saveEpisode, onEpisodesChanged } from '../sim/episodeStore.js'
 const params = new URLSearchParams(location.search)
 const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 
-const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x4a4a6e, roughness: 0.4, metalness: 0.25 })
-const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x6a6a9e, roughness: 0.35, metalness: 0.3 })
+// Real G1 colors: dark grey shell, silver joint housings, rubber finger pads
+const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x2e3036, roughness: 0.55, metalness: 0.3 })
+const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0xaeb3ba, roughness: 0.35, metalness: 0.85 })
+const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0 })
 const ACCENT_MESH = /contour|shoulder_roll|shoulder_pitch|waist|logo/
+const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
+const SHADOW_CASTER_BODY = /elbow|wrist|hand/
+const SCENE_MATERIALS = {
+  floor: { roughness: 0.95 },
+  table_top: { roughness: 0.75 },
+  box: { roughness: 0.85 },                              // matte plastic bin (prefix match)
+  tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 }, // brushed steel
+}
 const SCENE_BODIES = new Set(['world', 'table', 'box', 'tube'])
-const TOUCH_EMISSIVE = new THREE.Color(0x1f6f3a)
+const GHOST_SHOW_AT = 0.02   // m between the operator's wrist and the robot palm before the ghost appears
+const GHOST_FULL_AT = 0.06
+const GHOST_CHAINS = [
+  ['wrist', 'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip'],
+  ['wrist', 'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip'],
+  ['wrist', 'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip'],
+]
+const PALM_OFFSET = [new THREE.Vector3(0.0415, 0.003, 0), new THREE.Vector3(0.0415, -0.003, 0)]
+const TOUCH_EMISSIVE = new THREE.Color(0x0e4a26)
 const NO_EMISSIVE = new THREE.Color(0x000000)
 const CORRECTION = [XR_TO_URDF_L, XR_TO_URDF_R]
 const RAW_HAND = 25 * 7
@@ -30,9 +49,11 @@ const _q = new THREE.Quaternion()
 const _inv = new THREE.Matrix4()
 const _rootQinv = new THREE.Quaternion()
 const _eye = new THREE.Vector3()
+const _palm = new THREE.Vector3()
+const _dummy = new THREE.Object3D()
 
 export function MujocoScene({ vrMode = 'unlocked' }) {
-  const { gl, camera } = useThree()
+  const { gl, camera, scene } = useThree()
   const worldRef = useRef()
   const workerRef = useRef(null)
   const [world, setWorld] = useState(null)
@@ -69,6 +90,16 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
     const unsubscribe = onEpisodesChanged(s => { saved.current = s })
     return () => { worker.terminate(); unsubscribe() }
   }, [])
+
+  // Image-based lighting from a procedural room: no texture download, generated once at startup
+  useEffect(() => {
+    const pmrem = new THREE.PMREMGenerator(gl)
+    const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    scene.environment = env
+    scene.environmentIntensity = 0.55
+    pmrem.dispose()
+    return () => { scene.environment = null; env.dispose() }
+  }, [gl, scene])
 
   // Desktop preview camera: front-left of the robot, or the operator's view with ?view=eye.
   // WebXR overrides it with the headset pose.
@@ -118,21 +149,18 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
     }
 
     const { input: inp, raw } = input.current
-    readOperator(xrFrame, session, refSpace, camera, world.root, st.hands, delta, inp, raw)
+    readOperator(xrFrame, session, refSpace, camera, world, st.hands, delta, inp, raw)
     workerRef.current?.postMessage({ type: 'input', input: inp, raw })
   })
 
   return (
     <>
-      <directionalLight position={[5, 10, 7]} intensity={4} />
-      <directionalLight position={[-4, 6, -3]} intensity={2} />
-      <directionalLight position={[0, 4, 8]} intensity={2} color="#eeeeff" />
-      <ambientLight intensity={2.0} />
-      <hemisphereLight skyColor="#aaccee" groundColor="#555555" intensity={1.5} />
+      <hemisphereLight skyColor="#c8d8e8" groundColor="#4a4540" intensity={0.9} />
       <group ref={worldRef}>
         <gridHelper args={[30, 60, '#5588aa', '#445566']} position={[0, 0.001, 0]} />
         {world && <primitive object={world.root} />}
       </group>
+      {world && <primitive object={world.ghostGroup} />}
     </>
   )
 }
@@ -149,8 +177,8 @@ function buildWorld({ scene, eye, task }) {
     root.add(g)
     return g
   })
-  const handMaterials = [MAT_BODY.clone(), MAT_BODY.clone()]
-  const handAccents = [MAT_ACCENT.clone(), MAT_ACCENT.clone()]
+  // Per hand: [shell, accent, pad] clones so the touch glow can tint one hand at a time
+  const handMaterials = [0, 1].map(() => [MAT_BODY.clone(), MAT_ACCENT.clone(), MAT_PAD.clone()])
   const headMeshes = []
   const meshCache = new Map()
 
@@ -160,22 +188,50 @@ function buildWorld({ scene, eye, task }) {
     let material
     if (SCENE_BODIES.has(bodyName)) {
       const [r, g, b, a] = geom.rgba
+      const key = Object.keys(SCENE_MATERIALS).find(k => geom.name.startsWith(k))
       material = new THREE.MeshStandardMaterial({
         color: new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace),
-        roughness: geom.type === 0 ? 0.9 : 0.6, transparent: a < 1, opacity: a,
+        roughness: 0.6, transparent: a < 1, opacity: a,
+        ...(key ? SCENE_MATERIALS[key] : {}),
       })
     } else {
-      const accent = ACCENT_MESH.test(meshName)
       const hand = bodyName.startsWith('left_hand_') || bodyName === 'left_wrist_yaw_link' ? 0
         : bodyName.startsWith('right_hand_') || bodyName === 'right_wrist_yaw_link' ? 1 : -1
-      material = hand >= 0 ? (accent ? handAccents : handMaterials)[hand] : accent ? MAT_ACCENT : MAT_BODY
+      const kind = PAD_BODY.test(bodyName) ? 2 : ACCENT_MESH.test(meshName) ? 1 : 0
+      material = hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
     }
     const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache), material)
     mesh.position.fromArray(geom.pos)
     mesh.quaternion.set(geom.quat[1], geom.quat[2], geom.quat[3], geom.quat[0])
+    // One shadow pass: only the forearms, hands and tube cast; the table, box, floor and tube receive
+    mesh.castShadow = bodyName === 'tube' || SHADOW_CASTER_BODY.test(bodyName)
+    mesh.receiveShadow = SCENE_BODIES.has(bodyName)
     if (meshName === 'head_link') headMeshes.push(mesh)
     bodies[geom.body].add(mesh)
   }
+
+  // Key light inside the robot frame (z up) so its shadow camera follows the scene after VR calibration
+  const sun = new THREE.DirectionalLight(0xfff4e6, 2.6)
+  sun.position.set(-0.8, 0.9, 2.6)
+  sun.target.position.set(0.45, 0, 0.8)
+  sun.castShadow = true
+  sun.shadow.mapSize.set(1024, 1024)
+  sun.shadow.camera.left = sun.shadow.camera.bottom = -1.1
+  sun.shadow.camera.right = sun.shadow.camera.top = 1.1
+  sun.shadow.camera.near = 0.5
+  sun.shadow.camera.far = 5
+  sun.shadow.bias = -0.0004
+  sun.shadow.normalBias = 0.02
+  root.add(sun, sun.target)
+  const fill = new THREE.DirectionalLight(0xdde8ff, 0.7)
+  fill.position.set(1.5, -1.5, 1.8)
+  fill.target.position.set(0.45, 0, 0.8)
+  root.add(fill, fill.target)
+
+  const ghostGroup = new THREE.Group()
+  const ghosts = [makeGhostHand(), makeGhostHand()]
+  ghosts.forEach(g => ghostGroup.add(g.group))
+  const wristBodies = ['left', 'right'].map(side => bodies[scene.bodies.indexOf(`${side}_wrist_yaw_link`)])
 
   const hud = makeHud()
   hud.mesh.position.set(0.8, 0, 1.04)
@@ -186,7 +242,7 @@ function buildWorld({ scene, eye, task }) {
   reset.group.position.fromArray(task.resetButton)
   root.add(reset.group)
 
-  return { root, bodies, eye, handMaterials: [[handMaterials[0], handAccents[0]], [handMaterials[1], handAccents[1]]], headMeshes, hud, reset }
+  return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies }
 }
 
 function geomGeometry(g, meshes, cache) {
@@ -196,7 +252,15 @@ function geomGeometry(g, meshes, cache) {
     case 2: return new THREE.SphereGeometry(s0, 24, 16)
     case 3: return new THREE.CapsuleGeometry(s0, 2 * s1, 8, 16).rotateX(Math.PI / 2)
     case 4: return new THREE.SphereGeometry(1, 24, 16).scale(s0, s1, s2)
-    case 5: return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
+    case 5: {
+      if (g.name !== 'tube') return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
+      // hollow tube with a 2 mm wall; the physics collides with the solid cylinder
+      const ri = s0 - 0.002
+      const profile = [[ri, -s1], [s0, -s1], [s0, s1], [ri, s1], [ri, -s1]].map(([x, y]) => new THREE.Vector2(x, y))
+      const lathe = new THREE.LatheGeometry(profile, 48).toNonIndexed()
+      lathe.computeVertexNormals()
+      return lathe.rotateX(Math.PI / 2)
+    }
     case 6: return new THREE.BoxGeometry(2 * s0, 2 * s1, 2 * s2)
     case 7: {
       if (!cache.has(g.mesh)) {
@@ -230,6 +294,53 @@ function applyInfo(world, info, saved) {
   }
   world.reset.setProgress(info.resetProgress)
   world.hud.draw(info, saved)
+}
+
+// ── Ghost hand: the operator's real hand, shown only when the robot hand can't follow it ────────────
+
+function makeGhostHand() {
+  const group = new THREE.Group()
+  const segments = GHOST_CHAINS.reduce((n, c) => n + c.length - 1, 0)
+  const lineGeo = new THREE.BufferGeometry()
+  lineGeo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(segments * 6), 3))
+  const lineMat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthTest: false })
+  const lines = new THREE.LineSegments(lineGeo, lineMat)
+  lines.frustumCulled = false
+  const jointNames = [...new Set(GHOST_CHAINS.flat())]
+  const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0, depthTest: false })
+  const dots = new THREE.InstancedMesh(new THREE.SphereGeometry(0.004, 6, 5), dotMat, jointNames.length)
+  dots.frustumCulled = false
+  group.add(lines, dots)
+  group.visible = false
+  group.renderOrder = 10
+  return {
+    group,
+    update(joints, strength) {
+      group.visible = strength > 0
+      if (!group.visible) return
+      lineMat.opacity = 0.75 * strength
+      dotMat.opacity = 0.9 * strength
+      const pos = lineGeo.attributes.position
+      let i = 0
+      for (const chain of GHOST_CHAINS) {
+        for (let k = 0; k + 1 < chain.length; k++) {
+          const a = joints[chain[k]]?.position, b = joints[chain[k + 1]]?.position
+          if (!a || !b) continue
+          pos.setXYZ(i++, a.x, a.y, a.z)
+          pos.setXYZ(i++, b.x, b.y, b.z)
+        }
+      }
+      pos.needsUpdate = true
+      jointNames.forEach((n, k) => {
+        const p = joints[n]?.position
+        _dummy.position.copy(p ?? lines.position)
+        _dummy.scale.setScalar(p ? (n === 'wrist' ? 2 : 1) : 0)
+        _dummy.updateMatrix()
+        dots.setMatrixAt(k, _dummy.matrix)
+      })
+      dots.instanceMatrix.needsUpdate = true
+    },
+  }
 }
 
 // ── In-scene UI ─────────────────────────────────────────────────────────────
@@ -367,7 +478,8 @@ function writePose(p, q, out, o) {
   out[o + 3] = _q.w; out[o + 4] = _q.x; out[o + 5] = _q.y; out[o + 6] = _q.z
 }
 
-function readOperator(xrFrame, session, refSpace, camera, root, hands, dt, input, raw) {
+function readOperator(xrFrame, session, refSpace, camera, world, hands, dt, input, raw) {
+  const { root } = world
   root.updateWorldMatrix(true, false)
   _inv.copy(root.matrixWorld).invert()
   root.getWorldQuaternion(_rootQinv).invert()
@@ -376,11 +488,13 @@ function readOperator(xrFrame, session, refSpace, camera, root, hands, dt, input
   writePose(camera.position, camera.quaternion, raw, 0)
   const now = performance.now() / 1000
 
+  const seen = [false, false]
   for (const source of session.inputSources) {
     if (!source.hand) continue
     const s = source.handedness === 'left' ? 0 : source.handedness === 'right' ? 1 : -1
     if (s < 0) continue
     const h = hands[s]
+    seen[s] = true
     const joints = {}
     XR_JOINT_NAMES.forEach((name, i) => {
       const space = source.hand.get(name)
@@ -408,7 +522,13 @@ function readOperator(xrFrame, session, refSpace, camera, root, hands, dt, input
     const f = h.fingers.update(retargetHand(joints))
     input.set([f.thumb.abduction, f.thumb.curl[0], f.thumb.curl[1], f.index.curl[0], f.index.curl[1],
       f.middle.curl[0], f.middle.curl[1]], o + 8)
+
+    // Ghost: fade in with the gap between where the operator's wrist is and where the robot palm got to
+    world.wristBodies[s].localToWorld(_palm.copy(PALM_OFFSET[s]))
+    const gap = _palm.distanceTo(pos)
+    world.ghosts[s].update(joints, Math.min(1, Math.max(0, (gap - GHOST_SHOW_AT) / (GHOST_FULL_AT - GHOST_SHOW_AT))))
   }
+  for (let s = 0; s < 2; s++) if (!seen[s]) world.ghosts[s].group.visible = false
 }
 
 function setStatusText(text) {
