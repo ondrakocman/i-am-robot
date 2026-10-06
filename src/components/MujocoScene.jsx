@@ -12,16 +12,17 @@ import { saveEpisode, onEpisodesChanged } from '../sim/episodeStore.js'
 const params = new URLSearchParams(location.search)
 const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 
-// G1 colors as assigned in Unitree's own URDF: light grey shell ("white" 0.7) everywhere except the pelvis,
-// hip-pitch housings, feet, head and logo ("dark" 0.2). Rubber pads on the distal finger links are ours.
-const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0xb6b8bb, roughness: 0.5, metalness: 0.35 })
+// G1 colors: brushed-aluminium shell on the body and arms (Unitree's URDF "white" material), dark pelvis,
+// hip-pitch housings, feet, head and logo (URDF "dark"), and black Dex3 hands with rubber fingertip pads.
+const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x9c9fa3, roughness: 0.42, metalness: 0.7 })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3 })
 const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0 })
-const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$/
+const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_|_wrist_yaw_link$/
 const DARK_MESH = /^(head_link|logo_link)$/
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
 // Visible room around the robot (robot frame: x forward, z up); visual only, nothing collides with it
-const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.45], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.89] }
+// The box bottom sits 2 cm under the MuJoCo floor plane so the two don't z-fight.
+const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.43], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.87] }
 const SHADOW_CASTER_BODY = /elbow|wrist|hand/
 const SCENE_MATERIALS = {
   floor: { roughness: 0.95 },
