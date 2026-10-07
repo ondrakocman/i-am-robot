@@ -60,7 +60,7 @@ const _eye = new THREE.Vector3()
 const _palm = new THREE.Vector3()
 const _dummy = new THREE.Object3D()
 
-export function MujocoScene({ vrMode = 'unlocked' }) {
+export function MujocoScene() {
   const { gl, camera, scene } = useThree()
   const worldRef = useRef()
   const workerRef = useRef(null)
@@ -68,8 +68,6 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
   const latest = useRef(null)
   const applied = useRef(null)
   const saved = useRef({ total: 0, success: 0 })
-  const modeRef = useRef(vrMode)
-  modeRef.current = vrMode
   const xr = useRef({ session: null, calibrated: false, hands: [newHandState(), newHandState()] })
   const input = useRef({ input: new Float32Array(INPUT_SIZE), raw: new Float32Array(RAW_SIZE) })
 
@@ -125,9 +123,9 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
   }, [camera, gl, world])
 
   useEffect(() => {
-    const hideHead = vrMode === 'locked' || params.get('view') === 'eye'
+    const hideHead = params.get('view') === 'eye'
     if (world) world.headMeshes.forEach(m => { m.visible = !hideHead })
-  }, [world, vrMode])
+  }, [world])
 
   useFrame((_state, delta, xrFrame) => {
     if (!world) return
@@ -151,10 +149,8 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
 
     _eye.fromArray(world.eye)
     if (!st.calibrated) {
-      calibrate(modeRef.current, camera, worldRef.current, world.root, _eye)
+      calibrate(camera, worldRef.current, world.root, _eye)
       st.calibrated = true
-    } else if (modeRef.current === 'locked') {
-      followEye(camera, worldRef.current, world.root, _eye)
     }
 
     const { input: inp, raw } = input.current
@@ -457,21 +453,15 @@ function makeResetButton() {
   }
 }
 
-// ── Calibration (same behaviour as the kinematic app) ───────────────────────
+// ── Calibration ──────────────────────────────────────────────────────────────
+// Once per session: turn the world to face the way the headset faces and put the robot's eyes under the
+// headset horizontally. Height stays the room's (the robot's eyes are at 1.24 m; a seated operator is lower)
+// and the world never moves afterwards: a world that follows the head is what made people dizzy.
 
-function calibrate(mode, camera, worldGroup, root, eyeLocal) {
+function calibrate(camera, worldGroup, root, eyeLocal) {
   const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
   worldGroup.position.set(0, 0, 0)
   worldGroup.rotation.set(0, euler.y, 0)
-  worldGroup.updateMatrixWorld(true)
-  const eye = root.localToWorld(eyeLocal.clone())
-  worldGroup.position.x += camera.position.x - eye.x
-  worldGroup.position.z += camera.position.z - eye.z
-  if (mode === 'locked') worldGroup.position.y += camera.position.y - eye.y
-  worldGroup.updateMatrixWorld(true)
-}
-
-function followEye(camera, worldGroup, root, eyeLocal) {
   worldGroup.updateMatrixWorld(true)
   const eye = root.localToWorld(eyeLocal.clone())
   worldGroup.position.x += camera.position.x - eye.x

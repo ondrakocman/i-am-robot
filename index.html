@@ -49,16 +49,6 @@
       box-shadow: 0 0 50px #00d4ff44;
       border-color: #00d4ff88;
     }
-    .vr-btn.locked {
-      color: #ff8844;
-      border-color: #ff884444;
-      box-shadow: 0 0 30px #ff884422;
-    }
-    .vr-btn.locked:hover {
-      background: linear-gradient(135deg, #ff884422, #ff440022);
-      box-shadow: 0 0 50px #ff884444;
-      border-color: #ff884488;
-    }
 
     .mode-desc {
       font-size: 11px;
@@ -124,13 +114,9 @@
   <div id="root"></div>
   <div id="ui-overlay">
     <div class="vr-btn-row">
-      <button id="enter-vr-locked" class="vr-btn locked">
-        First Person
-        <div class="mode-desc">View locked to robot head</div>
-      </button>
-      <button id="enter-vr-unlocked" class="vr-btn">
-        Third Person
-        <div class="mode-desc">Static robot, free camera</div>
+      <button id="enter-vr" class="vr-btn">
+        Enter VR
+        <div class="mode-desc">You stand where the robot stands</div>
       </button>
     </div>
     <label id="task-row">Task

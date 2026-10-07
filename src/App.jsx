@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
 import * as THREE from 'three'
@@ -19,29 +19,22 @@ const xrStore = createXRStore({
 })
 
 export default function App() {
-  const [vrMode, setVrMode] = useState('unlocked')
-
   useEffect(() => {
-    const lockedBtn = document.getElementById('enter-vr-locked')
-    const unlockedBtn = document.getElementById('enter-vr-unlocked')
+    const btn = document.getElementById('enter-vr')
     const status = document.getElementById('status')
     const instructions = document.querySelector('#instructions')
-
-    if (!lockedBtn || !unlockedBtn) return
+    if (!btn) return
 
     if (!navigator.xr) {
-      lockedBtn.textContent = 'WebXR N/A'
-      unlockedBtn.textContent = 'WebXR N/A'
-      lockedBtn.disabled = true
-      unlockedBtn.disabled = true
+      btn.textContent = 'WebXR N/A'
+      btn.disabled = true
       if (status) status.textContent = 'Use Meta Quest 3 Browser'
       return
     }
 
     navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
       if (!supported) {
-        lockedBtn.style.opacity = '0.5'
-        unlockedBtn.style.opacity = '0.5'
+        btn.style.opacity = '0.5'
         if (status) status.textContent = 'Open on Meta Quest 3 browser'
       } else {
         if (status) status.textContent = 'Quest 3 Ready'
@@ -49,15 +42,9 @@ export default function App() {
       }
     })
 
-    const enterLocked = () => { setVrMode('locked'); xrStore.enterVR() }
-    const enterUnlocked = () => { setVrMode('unlocked'); xrStore.enterVR() }
-
-    lockedBtn.addEventListener('click', enterLocked)
-    unlockedBtn.addEventListener('click', enterUnlocked)
-    return () => {
-      lockedBtn.removeEventListener('click', enterLocked)
-      unlockedBtn.removeEventListener('click', enterUnlocked)
-    }
+    const enter = () => xrStore.enterVR()
+    btn.addEventListener('click', enter)
+    return () => btn.removeEventListener('click', enter)
   }, [])
 
   // Task selector: the task is a URL parameter so the worker and a reload agree on it
@@ -122,7 +109,7 @@ export default function App() {
     >
       <color attach="background" args={['#607080']} />
       <XR store={xrStore}>
-        {LEGACY ? <Scene vrMode={vrMode} /> : <MujocoScene vrMode={vrMode} />}
+        {LEGACY ? <Scene /> : <MujocoScene />}
       </XR>
     </Canvas>
   )

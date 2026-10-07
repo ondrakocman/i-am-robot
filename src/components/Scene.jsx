@@ -31,7 +31,7 @@ function PhysicsFloor() {
   )
 }
 
-export function Scene({ vrMode }) {
+export function Scene({ vrMode = 'unlocked' }) {
   const worldRef = useRef()
 
   return (

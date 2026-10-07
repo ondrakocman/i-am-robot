@@ -16,6 +16,9 @@
     <default class="touchable">
       <geom solref="0.01 1" priority="1"/>
     </default>
+    <default class="tube_wall">
+      <geom type="box" size="0.001 0.0091 0.07" group="3" solref="0.01 1" priority="1" condim="6" friction="0.7 0.01 0.002"/>
+    </default>
   </default>
 
   <asset>
@@ -48,13 +51,21 @@
     </body>
 
     <!-- Steel tube: 44 mm outer diameter, 2 mm wall, 14 cm long -> 0.30 kg with hollow-cylinder inertia.
-         Collision is the solid cylinder (a convex hull would fill the bore anyway). Steel on rubber pads
-         mu~0.7; condim 6 adds torsional friction (pinches don't spin) and rolling friction (a tube lying on
-         its side stops instead of rolling off the table). -->
+         The bore is real: collision is a ring of 8 thin boxes (a convex hull would fill it), so a finger
+         can go inside. Steel on rubber pads mu~0.7; condim 6 adds torsional friction (pinches don't spin)
+         and rolling friction (a tube lying on its side stops instead of rolling off the table). -->
     <body name="tube" pos="0.31 0.15 0.861">
       <freejoint name="tube_free"/>
       <inertial pos="0 0 0" mass="0.3" diaginertia="5.56e-4 5.56e-4 1.33e-4"/>
-      <geom name="tube" class="touchable" type="cylinder" size="0.022 0.07" condim="6" friction="0.7 0.01 0.002" material="tube"/>
+      <geom name="tube" type="cylinder" size="0.022 0.07" contype="0" conaffinity="0" density="0" material="tube"/>
+      <geom name="tube_wall0" class="tube_wall" pos="0.0210 0.0000 0" quat="1.000000 0 0 0.000000"/>
+      <geom name="tube_wall1" class="tube_wall" pos="0.0148 0.0148 0" quat="0.923880 0 0 0.382683"/>
+      <geom name="tube_wall2" class="tube_wall" pos="0.0000 0.0210 0" quat="0.707107 0 0 0.707107"/>
+      <geom name="tube_wall3" class="tube_wall" pos="-0.0148 0.0148 0" quat="0.382683 0 0 0.923880"/>
+      <geom name="tube_wall4" class="tube_wall" pos="-0.0210 0.0000 0" quat="0.000000 0 0 1.000000"/>
+      <geom name="tube_wall5" class="tube_wall" pos="-0.0148 -0.0148 0" quat="-0.382683 0 0 0.923880"/>
+      <geom name="tube_wall6" class="tube_wall" pos="-0.0000 -0.0210 0" quat="-0.707107 0 0 0.707107"/>
+      <geom name="tube_wall7" class="tube_wall" pos="0.0148 -0.0148 0" quat="-0.923880 0 0 0.382683"/>
     </body>
   </worldbody>
 </mujoco>
