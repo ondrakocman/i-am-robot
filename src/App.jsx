@@ -60,6 +60,20 @@ export default function App() {
     }
   }, [])
 
+  // Task selector: the task is a URL parameter so the worker and a reload agree on it
+  useEffect(() => {
+    const select = document.getElementById('task')
+    if (!select) return
+    const params = new URLSearchParams(location.search)
+    if (params.get('task')) select.value = params.get('task')
+    const onChange = () => {
+      params.set('task', select.value)
+      location.search = params.toString()
+    }
+    select.addEventListener('change', onChange)
+    return () => select.removeEventListener('change', onChange)
+  }, [])
+
   useEffect(() => {
     const row = document.getElementById('episodes')
     if (LEGACY || !row) return

@@ -1,9 +1,15 @@
-// Tube-into-box task on the fixed-base G1 + Dex3 model. Owns the MuJoCo state, turns operator input into
-// actuator targets (IK for the arms, retargeted curls for the fingers), checks task success and records
-// episodes. Pure JS: runs in the physics worker and in Node (scripts/sim-check.mjs).
+// Generic manipulation task on the fixed-base G1 + Dex3 model. Owns the MuJoCo state, turns operator input into
+// actuator targets (IK for the arms, retargeted curls for the fingers), runs the task module's reset / goal
+// logic, and records episodes. Pure JS: runs in the physics worker and in Node (scripts/sim-check.mjs).
+//
+// A task module (src/sim/tasks/*.js) provides:
+//   name, instruction (language instruction logged with each episode), title (short HUD text), scene (xml under public/), objects (free bodies, joint named `${body}_free`),
+//   dropZ, timeout, reset(sim, rng) -> layout, randomize?(rng) -> physics params, goal(sim) -> boolean,
+//   autopilot?(sim, t) -> per-hand grip targets for the scripted check.
 
 import { ArmIK, ARM_JOINTS } from './ik.js'
 import { EpisodeRecorder } from './episode.js'
+import { writeHandInput } from './autopilot.js'
 
 export const CONTROL_HZ = 50
 export const SIDES = ['left', 'right']
@@ -18,26 +24,16 @@ export const INPUT_SIZE = 2 * HAND_INPUT
 // the 25 WebXR joints (pos 3 + quat wxyz 4), all in the MuJoCo world frame.
 export const RAW_SIZE = 7 + 2 * 25 * 7
 
-export const TASK = {
-  name: 'tube_box',
-  instruction: 'Put the orange tube into the blue box',
-  tubeHome: [0.31, 0.15],
-  tubeJitter: 0.025,
-  boxInner: [0.09, 0.1],        // half extents of the box interior (x, y)
-  boxMaxZ: 0.89,                // tube center must be below this (box rim is at 0.86)
-  restSpeed: 0.05,              // m/s
-  successHold: 0.5,             // s resting in the box with both hands off the tube
-  dropZ: 0.68,                  // tube center below this = fell off the table
-  timeout: 60,                  // s
+// Shared across tasks
+export const COMMON = {
+  restSpeed: 0.05,              // m/s: objects must be slower than this for the goal to count
+  successHold: 0.5,             // s the goal must hold with both hands off the objects
   endHold: 1.5,                 // s to show the outcome before the next episode
   resetButton: [0.18, 0.36, 1.06],
   resetRadius: 0.06,
   resetHold: 0.6,
-  // Physics randomization per episode (logged in the header)
-  tubeMassRange: [0.2, 0.4],      // kg
-  tubeFrictionRange: [0.5, 0.9],
   // Episodes whose arm joints exceed this are flagged 'fast_motion' (normal teleop stays < 3 rad/s)
-  fastMotion: 6,                  // rad/s
+  fastMotion: 6,                // rad/s
 }
 
 // Start posture: hands raised near the chest, clear of the objects (grip ~(0.22, +-0.13, 1.03))
@@ -69,28 +65,27 @@ function mulberry32(seed) {
   }
 }
 
-const smooth = (a, b, u) => { u = Math.max(0, Math.min(1, u)); u = u * u * (3 - 2 * u); return a + (b - a) * u }
-
-export class TubeBoxSim {
+export class TaskSim {
   /**
    * @param mj      loaded MuJoCo module
-   * @param m       MjModel of public/mujoco/tube_box.xml
+   * @param m       MjModel of the task's scene
+   * @param task    task module
    * @param opts.onEpisode  called with { header, frames: Float32Array } whenever an episode ends
-   * @param opts.autopilot  drive the left hand with a scripted pick-and-place (testing / desktop demo)
+   * @param opts.autopilot  drive the hands with the task's scripted demonstration (testing / desktop demo)
    */
-  constructor(mj, m, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {}, armLead = ARM_LEAD } = {}) {
-    this.armLead = armLead
+  constructor(mj, m, task, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {}, armLead = ARM_LEAD } = {}) {
     this.mj = mj
     this.m = m
+    this.task = task
     this.d = new mj.MjData(m)
     this.ikData = new mj.MjData(m)
     this.seed = seed
-    this.autopilot = autopilot
+    this.autopilot = autopilot && !!task.autopilot
     this.onEpisode = onEpisode
     this.meta = meta
+    this.armLead = armLead
 
-    const opt = m.opt
-    this.dt = opt.timestep
+    this.dt = m.opt.timestep
     this.stepsPerControl = Math.max(1, Math.round(1 / (CONTROL_HZ * this.dt)))
     this.controlDt = this.stepsPerControl * this.dt
     this.steps = 0
@@ -101,25 +96,16 @@ export class TubeBoxSim {
       return i
     }
     this.name = (type, i) => mj.mj_id2name(m, mj.mjtObj[type].value, i) ?? ''
-
-    this.tubeBody = id('mjOBJ_BODY', 'tube')
-    this.tubeGeom = id('mjOBJ_GEOM', 'tube')
-    this.tubeMass0 = m.body_mass[this.tubeBody]
-    this.tubeInertia0 = Array.from(m.body_inertia.slice(3 * this.tubeBody, 3 * this.tubeBody + 3))
-    const tubeJnt = id('mjOBJ_JOINT', 'tube_free')
-    this.tubeQ = m.jnt_qposadr[tubeJnt]
-    this.tubeV = m.jnt_dofadr[tubeJnt]
-    this.boxBody = id('mjOBJ_BODY', 'box')
+    this.bodyId = name => id('mjOBJ_BODY', name)
     this.eyeSite = id('mjOBJ_SITE', 'eye')
 
     const mirror = (pose, side) => ARM_JOINTS.map(n => (MIRRORED.has(n) && side === 'right' ? -1 : 1) * pose[n])
     this.arms = SIDES.map(side => {
-      const posture = mirror(POSTURE, side)
       const fingerJnt = FINGER_JOINTS.map(n => id('mjOBJ_JOINT', `${side}_hand_${n}_joint`))
       return {
         side,
         ready: mirror(READY, side),
-        ik: new ArmIK(mj, m, side, posture),
+        ik: new ArmIK(mj, m, side, mirror(POSTURE, side)),
         act: Int32Array.from(ARM_JOINTS, n => id('mjOBJ_ACTUATOR', `${side}_${n}_joint`)),
         fingerAct: Int32Array.from(FINGER_JOINTS, n => id('mjOBJ_ACTUATOR', `${side}_hand_${n}_joint`)),
         fingerLo: fingerJnt.map(j => m.jnt_range[2 * j]),
@@ -130,6 +116,7 @@ export class TubeBoxSim {
         fingerCmd: new Float64Array(FINGER_JOINTS.length),
       }
     })
+    this.armDof = this.arms.flatMap(a => Array.from(a.ik.jnt, j => m.jnt_dofadr[j]))
 
     // Which hand (0 left, 1 right, -1 none) each body belongs to. The palm geom lives on the wrist_yaw body.
     this.handOfBody = new Int8Array(m.nbody).fill(-1)
@@ -139,6 +126,25 @@ export class TubeBoxSim {
         if (n.startsWith(`${s}_hand_`) || n === `${s}_wrist_yaw_link`) this.handOfBody[b] = i
       })
     }
+
+    // Task objects: free bodies the hands manipulate
+    this.objectOfGeom = new Int16Array(m.ngeom).fill(-1)
+    this.objects = task.objects.map((name, i) => {
+      const body = id('mjOBJ_BODY', name)
+      const jnt = id('mjOBJ_JOINT', `${name}_free`)
+      const geoms = []
+      for (let g = 0; g < m.ngeom; g++) {
+        if (m.geom_bodyid[g] === body && (m.geom_contype[g] || m.geom_conaffinity[g])) { geoms.push(g); this.objectOfGeom[g] = i }
+      }
+      return {
+        name, body, geoms,
+        q: m.jnt_qposadr[jnt], v: m.jnt_dofadr[jnt],
+        mass0: m.body_mass[body],
+        inertia0: Array.from(m.body_inertia.slice(3 * body, 3 * body + 3)),
+      }
+    })
+    this.touch = new Uint8Array(2 * this.objects.length) // [object][hand]
+    this.touching = new Uint8Array(2)                     // any object, per hand
 
     this.qposNames = []
     this.qvelNames = []
@@ -154,11 +160,9 @@ export class TubeBoxSim {
     }
     this.actuatorNames = Array.from({ length: m.nu }, (_, a) => this.name('mjOBJ_ACTUATOR', a))
 
-    this.armDof = this.arms.flatMap(a => Array.from(a.ik.jnt, j => m.jnt_dofadr[j]))
     this.input = new Float32Array(INPUT_SIZE)
     this.raw = new Float32Array(RAW_SIZE)
     this.autoInput = new Float32Array(INPUT_SIZE)
-    this.touching = new Uint8Array(2)
     this.recorder = new EpisodeRecorder([
       { name: 'time', size: 1 },
       { name: 'action', size: m.nu },
@@ -181,15 +185,14 @@ export class TubeBoxSim {
   requestReset() { this.pendingReset = true }
 
   reset() {
-    const { mj, m, d } = this
+    const { mj, m, d, task } = this
     if (this.status === 'running') this.endEpisode('aborted')
     this.episode++
     const rng = mulberry32(this.seed + this.episode * 9973)
-    const jitter = () => (rng() * 2 - 1) * TASK.tubeJitter
-    const uniform = ([lo, hi]) => lo + (hi - lo) * rng()
 
     mj.mj_resetData(m, d)
-    this.setPhysics({ tube_mass: uniform(TASK.tubeMassRange), tube_friction: uniform(TASK.tubeFrictionRange) })
+    // mj_setConst (inside setPhysics) rewrites qpos to the model default, so it must run before posing anything
+    this.setPhysics(task.randomize ? task.randomize(rng) : {})
     for (const arm of this.arms) {
       for (let k = 0; k < arm.qCmd.length; k++) {
         arm.qCmd[k] = arm.ready[k]
@@ -198,15 +201,14 @@ export class TubeBoxSim {
       }
       arm.fingerCmd.fill(0)
     }
-    const tube = [TASK.tubeHome[0] + jitter(), TASK.tubeHome[1] + jitter(), 0.861]
-    d.qpos.set([...tube, 1, 0, 0, 0], this.tubeQ)
+    this.layout = task.reset(this, rng)
     mj.mj_forward(m, d)
+    this.readyGrip = this.arms.map(arm => Array.from(d.site_xpos.slice(3 * arm.gripSite, 3 * arm.gripSite + 3)))
 
-    const b = 3 * this.boxBody
-    this.layout = { tube, box: [m.body_pos[b], m.body_pos[b + 1], m.body_pos[b + 2]] }
     this.initialQpos = Array.from(d.qpos)
     this.peakArmVel = 0
     this.status = 'waiting' // until the operator's hands show up
+    this.goalMet = false
     this.steps = 0
     this.startTime = 0
     this.endTime = 0
@@ -214,19 +216,44 @@ export class TubeBoxSim {
     this.resetTimer = 0
     this.pendingReset = false
     this.recorder.clear()
-    this.autoReady = null
   }
 
-  /** Applies randomized object properties; also used to restore them for replay. */
-  setPhysics({ tube_mass, tube_friction }) {
-    const { mj, m, d } = this
-    const scale = tube_mass / this.tubeMass0
-    m.body_mass[this.tubeBody] = tube_mass
-    for (let k = 0; k < 3; k++) m.body_inertia[3 * this.tubeBody + k] = this.tubeInertia0[k] * scale
-    m.geom_friction[3 * this.tubeGeom] = tube_friction
-    mj.mj_setConst(m, d)
-    this.physics = { tube_mass, tube_friction }
+  // ── Object helpers for task modules ──────────────────────────────────────
+
+  placeObject(i, [x, y, z], yaw = 0) {
+    this.d.qpos.set([x, y, z, Math.cos(yaw / 2), 0, 0, Math.sin(yaw / 2)], this.objects[i].q)
   }
+
+  objectPos(i) {
+    const q = this.objects[i].q
+    return [this.d.qpos[q], this.d.qpos[q + 1], this.d.qpos[q + 2]]
+  }
+
+  objectSpeed(i) {
+    const v = this.objects[i].v
+    return Math.hypot(this.d.qvel[v], this.d.qvel[v + 1], this.d.qvel[v + 2])
+  }
+
+  objectTouched(i) { return this.touch[2 * i] || this.touch[2 * i + 1] }
+
+  /** Applies randomized object properties { [objectName]: { mass?, friction? } }; also restores them for replay. */
+  setPhysics(params) {
+    const { mj, m, d } = this
+    for (const obj of this.objects) {
+      const p = params[obj.name]
+      if (!p) continue
+      if (p.mass !== undefined) {
+        const scale = p.mass / obj.mass0
+        m.body_mass[obj.body] = p.mass
+        for (let k = 0; k < 3; k++) m.body_inertia[3 * obj.body + k] = obj.inertia0[k] * scale
+      }
+      if (p.friction !== undefined) for (const g of obj.geoms) m.geom_friction[3 * g] = p.friction
+    }
+    mj.mj_setConst(m, d)
+    this.physics = params
+  }
+
+  // ── Stepping ─────────────────────────────────────────────────────────────
 
   /**
    * One physics step; runs the controller every `stepsPerControl` steps. Physics stays frozen until the
@@ -290,34 +317,40 @@ export class TubeBoxSim {
   }
 
   updateTask() {
-    const { m, d } = this
+    const { m, d, task } = this
     const cdt = this.controlDt
-    const q = this.tubeQ, v = this.tubeV
-    const px = d.qpos[q], py = d.qpos[q + 1], pz = d.qpos[q + 2]
-    const speed = Math.hypot(d.qvel[v], d.qvel[v + 1], d.qvel[v + 2])
 
-    this.touching[0] = this.touching[1] = 0
+    this.touch.fill(0)
+    this.touching.fill(0)
     const contacts = d.contact
     for (let i = 0, n = contacts.size(); i < n; i++) {
       const c = contacts.get(i)
-      const other = c.geom1 === this.tubeGeom ? c.geom2 : c.geom2 === this.tubeGeom ? c.geom1 : -1
+      const g1 = c.geom1, g2 = c.geom2
       c.delete()
-      if (other < 0) continue
-      const hand = this.handOfBody[m.geom_bodyid[other]]
-      if (hand >= 0) this.touching[hand] = 1
+      const o1 = this.objectOfGeom[g1], o2 = this.objectOfGeom[g2]
+      const obj = o1 >= 0 ? o1 : o2
+      if (obj < 0) continue
+      const hand = this.handOfBody[m.geom_bodyid[o1 >= 0 ? g2 : g1]]
+      if (hand < 0) continue
+      this.touch[2 * obj + hand] = 1
+      this.touching[hand] = 1
     }
     contacts.delete()
 
-    const [bx, by] = this.layout.box
-    this.tubeInBox = Math.abs(px - bx) < TASK.boxInner[0] && Math.abs(py - by) < TASK.boxInner[1] && pz < TASK.boxMaxZ
-    const settled = this.tubeInBox && speed < TASK.restSpeed && !this.touching[0] && !this.touching[1]
+    this.goalMet = task.goal(this)
+    let settled = this.goalMet && !this.touching[0] && !this.touching[1]
+    let dropped = false
+    for (let i = 0; i < this.objects.length; i++) {
+      if (this.objectSpeed(i) > COMMON.restSpeed) settled = false
+      if (this.objectPos(i)[2] < task.dropZ) dropped = true
+    }
 
     if (this.status === 'running') {
       this.successTimer = settled ? this.successTimer + cdt : 0
-      if (this.successTimer >= TASK.successHold) this.endEpisode('success')
-      else if (pz < TASK.dropZ) this.endEpisode('dropped')
-      else if (d.time - this.startTime > TASK.timeout) this.endEpisode('timeout')
-    } else if (this.status !== 'waiting' && d.time - this.endTime > TASK.endHold) {
+      if (this.successTimer >= COMMON.successHold) this.endEpisode('success')
+      else if (dropped) this.endEpisode('dropped')
+      else if (d.time - this.startTime > task.timeout) this.endEpisode('timeout')
+    } else if (this.status !== 'waiting' && d.time - this.endTime > COMMON.endHold) {
       this.reset()
       return
     }
@@ -325,15 +358,15 @@ export class TubeBoxSim {
     let near = false
     for (const arm of this.arms) {
       const s = 3 * arm.palmSite
-      const [rx, ry, rz] = TASK.resetButton
-      if (Math.hypot(d.site_xpos[s] - rx, d.site_xpos[s + 1] - ry, d.site_xpos[s + 2] - rz) < TASK.resetRadius) near = true
+      const [rx, ry, rz] = COMMON.resetButton
+      if (Math.hypot(d.site_xpos[s] - rx, d.site_xpos[s + 1] - ry, d.site_xpos[s + 2] - rz) < COMMON.resetRadius) near = true
     }
     this.resetTimer = near ? this.resetTimer + cdt : 0
-    if (this.resetTimer >= TASK.resetHold) this.pendingReset = true
+    if (this.resetTimer >= COMMON.resetHold) this.pendingReset = true
   }
 
   endEpisode(outcome) {
-    const { m, d } = this
+    const { m, d, task } = this
     this.status = outcome
     this.endTime = d.time
     const frames = this.recorder.snapshot()
@@ -342,8 +375,9 @@ export class TubeBoxSim {
     this.onEpisode({
       header: {
         format: 'iamr-episode-v1',
-        task: TASK.name,
-        instruction: TASK.instruction,
+        task: task.name,
+        instruction: task.instruction,
+        scene: task.scene,
         outcome,
         success: outcome === 'success',
         episode: this.episode,
@@ -355,8 +389,9 @@ export class TubeBoxSim {
         steps_per_control: this.stepsPerControl,
         layout: this.layout,
         physics: this.physics,
+        objects: task.objects,
         peak_arm_velocity: this.peakArmVel,
-        flags: this.peakArmVel > TASK.fastMotion ? ['fast_motion'] : [],
+        flags: this.peakArmVel > COMMON.fastMotion ? ['fast_motion'] : [],
         initial_qpos: this.initialQpos,
         nq: m.nq, nv: m.nv, nu: m.nu,
         qpos_names: this.qposNames,
@@ -387,49 +422,16 @@ export class TubeBoxSim {
     return Array.from(this.d.site_xpos.slice(s, s + 3))
   }
 
-  // Scripted left-hand pick and place: side grasp, carry over the box, release, pull back.
+  // The task's scripted demonstration: returns per-hand [gx, gy, gz, yaw, close] (null = hand at rest)
   autopilotInput() {
-    const { d } = this
-    const t = this.status === 'running' ? d.time - this.startTime : 0
-    const [tx, ty] = this.layout.tube
-    const [bx, by] = this.layout.box
-    const arm = this.arms[0]
-    if (!this.autoReady) {
-      const s = 3 * arm.gripSite
-      this.autoReady = Array.from(d.site_xpos.slice(s, s + 3))
-    }
-    const r = this.autoReady
-    const grip = this.layout.tube[2] + 0.02 // grasp a little above the tube's center
-    const lift = grip + 0.13
-    // [time, grip x, y, z, palm yaw, finger closure]; yaw turns the fingers inward to reach across the body
-    const keys = [
-      [0, r[0], r[1], r[2], 0, 0],
-      [1.0, tx, ty + 0.09, lift, 0, 0],
-      [2.0, tx, ty + 0.09, grip, 0, 0],
-      [3.0, tx, ty + 0.012, grip, 0, 0],
-      [3.8, tx, ty + 0.012, grip, 0, 1],
-      [5.0, tx, ty + 0.012, lift, 0, 1],
-      [7.0, bx - 0.01, by + 0.06, lift, -0.5, 1],
-      [8.0, bx - 0.01, by + 0.06, grip + 0.02, -0.5, 1],
-      [8.6, bx - 0.01, by + 0.06, grip + 0.02, -0.5, 0],
-      [10.0, r[0], r[1], r[2], 0, 0],
-    ]
-    let i = 0
-    while (i < keys.length - 2 && t > keys[i + 1][0]) i++
-    const [t0, ...a] = keys[i]
-    const [t1, ...b] = keys[i + 1]
-    const u = (t - t0) / (t1 - t0)
-    const [gx, gy, gz, yaw, close] = a.map((v, k) => smooth(v, b[k], u))
-
-    // palm = grip - R(yaw) (grip offset - palm offset); palm frame = world frame rotated by yaw about z
-    const c = Math.cos(yaw), s = Math.sin(yaw)
-    const ox = 0.0735, oy = -0.038
+    const t = this.status === 'running' ? this.d.time - this.startTime : 0
+    const hands = this.task.autopilot(this, t)
     const inp = this.autoInput
     inp.fill(0)
-    inp[0] = 1
-    inp[1] = gx - (c * ox - s * oy); inp[2] = gy - (s * ox + c * oy); inp[3] = gz
-    inp[4] = Math.cos(yaw / 2); inp[7] = Math.sin(yaw / 2)
-    for (let k = 1; k < 7; k++) inp[8 + k] = close
+    for (let s = 0; s < 2; s++) {
+      const g = hands[s] ?? [...this.readyGrip[s], 0, 0]
+      writeHandInput(inp, s * HAND_INPUT, s, g)
+    }
     return inp
   }
 }

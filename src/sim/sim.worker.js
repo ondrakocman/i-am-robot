@@ -4,7 +4,8 @@
 
 import loadMujoco from '@mujoco/mujoco'
 import { loadScene } from './loadScene.js'
-import { TubeBoxSim, TASK } from './TubeBoxSim.js'
+import { TaskSim, COMMON } from './TaskSim.js'
+import { getTask } from './tasks/index.js'
 import { encodeEpisode } from './episode.js'
 
 const TICK_MS = 4
@@ -24,17 +25,18 @@ self.onmessage = ({ data: msg }) => {
   else if (msg.type === 'reset') sim?.requestReset()
 }
 
-async function init({ baseUrl, timestep, autopilot, session }) {
+async function init({ baseUrl, timestep, autopilot, session, task: taskName }) {
+  const task = getTask(taskName)
   mj = await loadMujoco()
   const readFile = async path => {
     const res = await fetch(baseUrl + path)
     if (!res.ok) throw new Error(`fetch ${path}: ${res.status}`)
     return path.endsWith('.xml') ? res.text() : new Uint8Array(await res.arrayBuffer())
   }
-  const m = await loadScene(mj, readFile, { timestep })
-  sim = new TubeBoxSim(mj, m, {
+  const m = await loadScene(mj, readFile, { scene: task.scene, timestep })
+  sim = new TaskSim(mj, m, task, {
     autopilot,
-    meta: { session, mujoco: __MUJOCO_VERSION__, model: 'public/mujoco/tube_box.xml', autopilot },
+    meta: { session, mujoco: __MUJOCO_VERSION__, model: 'public/' + task.scene, autopilot },
     onEpisode: ({ header, frames }) => {
       const buffer = encodeEpisode(header, frames)
       self.postMessage({ type: 'episode', header, buffer }, [buffer])
@@ -42,7 +44,13 @@ async function init({ baseUrl, timestep, autopilot, session }) {
   })
 
   const { scene, transfer } = describeScene(m)
-  self.postMessage({ type: 'ready', scene, eye: sim.eyePosition(), task: TASK, timestep: sim.dt }, transfer)
+  self.postMessage({
+    type: 'ready',
+    scene,
+    eye: sim.eyePosition(),
+    task: { name: task.name, instruction: task.instruction, title: task.title ?? task.instruction, objects: task.objects, resetButton: COMMON.resetButton, resetHold: COMMON.resetHold },
+    timestep: sim.dt,
+  }, transfer)
   lastTick = perf.windowStart = performance.now()
   setInterval(tick, TICK_MS)
 }
@@ -87,8 +95,8 @@ function tick() {
         episode: sim.episode,
         elapsed: sim.status === 'waiting' ? 0 : (sim.status === 'running' ? sim.d.time : sim.endTime) - sim.startTime,
         touching: [sim.touching[0], sim.touching[1]],
-        resetProgress: Math.min(1, sim.resetTimer / TASK.resetHold),
-        tubeInBox: sim.tubeInBox,
+        resetProgress: Math.min(1, sim.resetTimer / COMMON.resetHold),
+        goalMet: sim.goalMet,
         rtf: perf.rtf,
         msPerStep: perf.msPerStep,
       },

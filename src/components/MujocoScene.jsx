@@ -6,7 +6,7 @@ import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { QuaternionSmoother } from '../systems/ImpedanceControl.js'
 import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
 import { XR_JOINT_NAMES, ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
-import { HAND_INPUT, INPUT_SIZE, RAW_SIZE } from '../sim/TubeBoxSim.js'
+import { HAND_INPUT, INPUT_SIZE, RAW_SIZE } from '../sim/TaskSim.js'
 import { saveEpisode, onEpisodesChanged } from '../sim/episodeStore.js'
 
 const params = new URLSearchParams(location.search)
@@ -17,20 +17,23 @@ const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x9c9fa3, roughness: 0.42, metalness: 0.7 })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3 })
 const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0 })
-const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_|_wrist_yaw_link$/
-const DARK_MESH = /^(head_link|logo_link)$/
+const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
+const DARK_MESH = /^(head_link|logo_link)$|_hand_palm_link$/   // palm mesh hangs off the (silver) wrist body
+const ROBOT_BODY = /_link$|^pelvis$/
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
 // Visible room around the robot (robot frame: x forward, z up); visual only, nothing collides with it
 // The box bottom sits 2 cm under the MuJoCo floor plane so the two don't z-fight.
 const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.43], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.87] }
 const SHADOW_CASTER_BODY = /elbow|wrist|hand/
-const SCENE_MATERIALS = {
+const SCENE_MATERIALS = {               // by geom-name prefix
   floor: { roughness: 0.95 },
   table_top: { roughness: 0.75 },
-  box: { roughness: 0.85 },                              // matte plastic bin (prefix match)
+  box: { roughness: 0.85 },                              // matte plastic
+  bin: { roughness: 0.8 },
   tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 }, // brushed steel
+  parcel: { roughness: 0.95 },                           // cardboard
+  label: { roughness: 0.7 },
 }
-const SCENE_BODIES = new Set(['world', 'table', 'box', 'tube'])
 const GHOST_SHOW_AT = 0.02   // m between the operator's wrist and the robot palm before the ghost appears
 const GHOST_FULL_AT = 0.06
 const GHOST_CHAINS = [
@@ -91,6 +94,7 @@ export function MujocoScene({ vrMode = 'unlocked' }) {
       timestep: Number(params.get('dt')) || undefined,
       autopilot: params.has('autopilot'),
       session: SESSION_ID,
+      task: params.get('task') || undefined,
     })
     const unsubscribe = onEpisodesChanged(s => { saved.current = s })
     return () => { worker.terminate(); unsubscribe() }
@@ -186,11 +190,13 @@ function buildWorld({ scene, eye, task }) {
   const headMeshes = []
   const meshCache = new Map()
 
+  const objects = new Set(task.objects)
   for (const geom of scene.geoms) {
     const bodyName = scene.bodies[geom.body]
     const meshName = geom.mesh >= 0 ? scene.meshes[geom.mesh].name : ''
+    const isRobot = ROBOT_BODY.test(bodyName)
     let material
-    if (SCENE_BODIES.has(bodyName)) {
+    if (!isRobot) {
       const [r, g, b, a] = geom.rgba
       const key = Object.keys(SCENE_MATERIALS).find(k => geom.name.startsWith(k))
       material = new THREE.MeshStandardMaterial({
@@ -207,9 +213,9 @@ function buildWorld({ scene, eye, task }) {
     const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache), material)
     mesh.position.fromArray(geom.pos)
     mesh.quaternion.set(geom.quat[1], geom.quat[2], geom.quat[3], geom.quat[0])
-    // One shadow pass: only the forearms, hands and tube cast; the table, box, floor and tube receive
-    mesh.castShadow = bodyName === 'tube' || SHADOW_CASTER_BODY.test(bodyName)
-    mesh.receiveShadow = SCENE_BODIES.has(bodyName)
+    // One shadow pass: only the forearms, hands and task objects cast; the scene receives
+    mesh.castShadow = objects.has(bodyName) || SHADOW_CASTER_BODY.test(bodyName)
+    mesh.receiveShadow = !isRobot
     if (meshName === 'head_link') headMeshes.push(mesh)
     bodies[geom.body].add(mesh)
   }
@@ -252,7 +258,7 @@ function buildWorld({ scene, eye, task }) {
   ghosts.forEach(g => ghostGroup.add(g.group))
   const wristBodies = ['left', 'right'].map(side => bodies[scene.bodies.indexOf(`${side}_wrist_yaw_link`)])
 
-  const hud = makeHud()
+  const hud = makeHud(task.title)
   hud.mesh.position.set(0.8, 0, 1.04)
   hud.mesh.quaternion.copy(FACING_ROBOT)
   root.add(hud.mesh)
@@ -373,7 +379,7 @@ const STATUS_TEXT = {
   aborted: ['RESET', '#9fb4c8'],
 }
 
-function makeHud() {
+function makeHud(instruction) {
   const canvas = document.createElement('canvas')
   canvas.width = 1024
   canvas.height = 512
@@ -402,7 +408,7 @@ function makeHud() {
     ctx.fill()
     ctx.fillStyle = '#ffffff'
     ctx.font = '600 54px system-ui, sans-serif'
-    ctx.fillText('Put the tube in the box', 56, 112)
+    ctx.fillText(instruction, 56, 112)
     ctx.fillStyle = color
     ctx.font = '700 64px system-ui, sans-serif'
     ctx.fillText(lines[0], 56, 228)

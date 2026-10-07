@@ -73,6 +73,20 @@
       letter-spacing: 0.04em;
     }
 
+    #task-row {
+      pointer-events: all;
+      color: #ffffff99;
+      font-size: 13px;
+    }
+    #task-row select {
+      margin-left: 8px;
+      background: #16213e;
+      color: #00d4ff;
+      border: 1px solid #00d4ff44;
+      border-radius: 6px;
+      padding: 5px 10px;
+      font-size: 13px;
+    }
     #episodes {
       display: flex;
       align-items: center;
@@ -119,6 +133,12 @@
         <div class="mode-desc">Static robot, free camera</div>
       </button>
     </div>
+    <label id="task-row">Task
+      <select id="task">
+        <option value="tube_box">Tube into box</option>
+        <option value="package_sort">Package sorting</option>
+      </select>
+    </label>
     <span id="status">Quest 3 · Hand Tracking Required</span>
     <span id="sim-status"></span>
     <div id="episodes" hidden>
