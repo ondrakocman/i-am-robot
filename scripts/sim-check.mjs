@@ -26,13 +26,13 @@ if (!task.autopilot) console.log('no scripted demonstration for this task: check
 
 const t0 = performance.now()
 let steps = 0
-let solvedAt = -1
+let solvedAt = 0
 while (episodes.length < runs && steps < runs * (task.timeout + 5) / sim.dt) {
-  if (!task.autopilot) {
-    // start the episode with a "tracked" idle hand, then after 2 s teleport the objects into the goal
-    if (sim.status === 'waiting') { sim.input.fill(0); sim.input[0] = 1; sim.input.set([...sim.readyGrip[0], 1, 0, 0, 0], 1); solvedAt = -1 }
-    if (sim.status === 'running' && solvedAt < 0) solvedAt = sim.steps
-    if (sim.status === 'running' && sim.steps === solvedAt + Math.round(2 / sim.dt)) { task.solved(sim); mj.mj_forward(m, sim.d) }
+  if (!task.autopilot && sim.status === 'waiting') {
+    // start the episode with a "tracked" idle hand; 2 s in, teleport the objects into the goal (on a frame
+    // boundary, so the logged event replays exactly)
+    sim.input.fill(0); sim.input[0] = 1; sim.input.set([...sim.readyGrip[0], 1, 0, 0, 0], 1)
+    if (solvedAt !== sim.episode) { sim.scheduleAtFrame(Math.round(2 / sim.controlDt), () => task.solved(sim)); solvedAt = sim.episode }
   }
   sim.step()
   steps++
@@ -42,7 +42,7 @@ console.log(`${steps} steps, ${ms.toFixed(3)} ms/step (${(ms / (sim.dt * 1000) *
 for (const e of episodes) {
   const h = e.header
   const phys = Object.entries(h.physics).map(([k, v]) => `${k} ${v.mass.toFixed(2)}kg/mu${v.friction.toFixed(2)}`).join(' ')
-  console.log(`episode ${h.episode}: ${h.outcome} after ${h.duration.toFixed(2)} s, ${h.frames} frames, peak arm ${h.peak_arm_velocity.toFixed(1)} rad/s${h.flags.length ? ' FLAGS ' + h.flags : ''}\n    ${phys}`)
+  console.log(`episode ${h.episode}: ${h.outcome} after ${h.duration.toFixed(2)} s, ${h.frames} frames, peak arm ${h.peak_arm_velocity.toFixed(1)} rad/s${h.flags.length ? ' FLAGS ' + h.flags : ''}${h.events.length ? `, ${h.events.length} events` : ''}${h.result ? ' ' + JSON.stringify(h.result) : ''}\n    ${phys}`)
 }
 
 // Replay check: initial qpos + logged float32 actions must reproduce the logged qpos exactly
@@ -53,14 +53,21 @@ if (e) {
   const d = new mj.MjData(m)
   sim.setPhysics(header.physics)
   d.qpos.set(header.initial_qpos)
+  d.ctrl.set(header.initial_ctrl)
   const q32 = new Float32Array(header.nq)
   let mismatch = -1
-  // In solved mode the objects are teleported at 2 s, which no action can reproduce: replay only up to that
-  const replayFrames = task.autopilot ? header.frames : Math.min(header.frames, Math.round(2 * header.control_hz))
+  const replayFrames = header.frames
+  let ev = 0
   for (let i = 0; i < replayFrames && mismatch < 0; i++) {
     const o = i * header.frame_size
     q32.set(d.qpos) // each frame logs the state at its control tick, before that tick's steps
     for (let k = 0; k < header.nq; k++) if (q32[k] !== frames[o + f.qpos.offset + k]) { mismatch = i; break }
+    // logged teleports (spawns) come after the frame they are tagged with, before the steps to the next one
+    for (; ev < header.events.length && header.events[ev].tick === i; ev++) {
+      const e = header.events[ev]
+      d.qpos.set(e.qpos, e.qpos_adr)
+      d.qvel.fill(0, e.qvel_adr, e.qvel_adr + 6)
+    }
     for (let a = 0; a < header.nu; a++) d.ctrl[a] = frames[o + f.action.offset + a]
     for (let s = 0; s < header.steps_per_control; s++) mj.mj_step(m, d)
   }

@@ -1,0 +1,126 @@
+<!--
+  Cube sorting: six 3D-printed PLA cubes, two of each colour, into the matching bins (the bin is the user's
+  own model, converted by scripts/convert-object.py). Robot faces +x, +y is the robot's left, z is up.
+-->
+<mujoco model="g1_cube_sort">
+  <include file="g1_upper.xml"/>
+
+  <!-- timestep is overridden at load time by the app (?dt=...) -->
+  <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10"/>
+
+  <default>
+    <default class="touchable">
+      <geom solref="0.01 1" priority="1"/>
+    </default>
+  </default>
+
+  <asset>
+    <material name="floor" rgba="0.42 0.42 0.44 1"/>
+    <material name="table" rgba="0.45 0.35 0.26 1"/>
+    <material name="table_leg" rgba="0.3 0.24 0.19 1"/>
+    <material name="red" rgba="0.85 0.15 0.12 1"/>
+    <material name="green" rgba="0.15 0.6 0.25 1"/>
+    <material name="blue" rgba="0.12 0.35 0.85 1"/>
+    <material name="red_bin" rgba="0.7 0.2 0.18 1"/>
+    <material name="green_bin" rgba="0.2 0.5 0.28 1"/>
+    <material name="blue_bin" rgba="0.18 0.32 0.68 1"/>
+    <mesh name="bin_visual" file="objects/bin/visual.stl"/>
+    <mesh name="bin_c0" file="objects/bin/c0.stl"/>
+    <mesh name="bin_c1" file="objects/bin/c1.stl"/>
+    <mesh name="bin_c2" file="objects/bin/c2.stl"/>
+    <mesh name="bin_c3" file="objects/bin/c3.stl"/>
+    <mesh name="bin_c4" file="objects/bin/c4.stl"/>
+    <mesh name="bin_c5" file="objects/bin/c5.stl"/>
+    <mesh name="bin_c6" file="objects/bin/c6.stl"/>
+    <mesh name="bin_c7" file="objects/bin/c7.stl"/>
+    <mesh name="bin_c8" file="objects/bin/c8.stl"/>
+    <mesh name="bin_c9" file="objects/bin/c9.stl"/>
+    <mesh name="bin_c10" file="objects/bin/c10.stl"/>
+    <mesh name="bin_c11" file="objects/bin/c11.stl"/>
+  </asset>
+
+  <worldbody>
+    <geom name="floor" type="plane" size="0 0 0.05" material="floor"/>
+
+    <body name="table" pos="0.43 0 0">
+      <geom name="table_top" class="touchable" type="box" size="0.25 0.5 0.015" pos="0 0 0.775" material="table"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="0.21 0.46 0.38" material="table_leg"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="0.21 -0.46 0.38" material="table_leg"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="-0.21 0.46 0.38" material="table_leg"/>
+      <geom type="box" size="0.02 0.02 0.38" pos="-0.21 -0.46 0.38" material="table_leg"/>
+    </body>
+
+    <!-- Bins (220 x 180 x 80 mm, base centred at pos): red on the left, green ahead, blue on the right -->
+    <body name="bin_red" pos="0.32 0.31 0.79">
+      <geom type="mesh" mesh="bin_visual" contype="0" conaffinity="0" density="0" material="red_bin"/>
+      <geom name="bin_red_c0" type="mesh" mesh="bin_c0" class="touchable" group="3"/>
+      <geom name="bin_red_c1" type="mesh" mesh="bin_c1" class="touchable" group="3"/>
+      <geom name="bin_red_c2" type="mesh" mesh="bin_c2" class="touchable" group="3"/>
+      <geom name="bin_red_c3" type="mesh" mesh="bin_c3" class="touchable" group="3"/>
+      <geom name="bin_red_c4" type="mesh" mesh="bin_c4" class="touchable" group="3"/>
+      <geom name="bin_red_c5" type="mesh" mesh="bin_c5" class="touchable" group="3"/>
+      <geom name="bin_red_c6" type="mesh" mesh="bin_c6" class="touchable" group="3"/>
+      <geom name="bin_red_c7" type="mesh" mesh="bin_c7" class="touchable" group="3"/>
+      <geom name="bin_red_c8" type="mesh" mesh="bin_c8" class="touchable" group="3"/>
+      <geom name="bin_red_c9" type="mesh" mesh="bin_c9" class="touchable" group="3"/>
+      <geom name="bin_red_c10" type="mesh" mesh="bin_c10" class="touchable" group="3"/>
+      <geom name="bin_red_c11" type="mesh" mesh="bin_c11" class="touchable" group="3"/>
+    </body>
+    <body name="bin_green" pos="0.47 0.0 0.79">
+      <geom type="mesh" mesh="bin_visual" contype="0" conaffinity="0" density="0" material="green_bin"/>
+      <geom name="bin_green_c0" type="mesh" mesh="bin_c0" class="touchable" group="3"/>
+      <geom name="bin_green_c1" type="mesh" mesh="bin_c1" class="touchable" group="3"/>
+      <geom name="bin_green_c2" type="mesh" mesh="bin_c2" class="touchable" group="3"/>
+      <geom name="bin_green_c3" type="mesh" mesh="bin_c3" class="touchable" group="3"/>
+      <geom name="bin_green_c4" type="mesh" mesh="bin_c4" class="touchable" group="3"/>
+      <geom name="bin_green_c5" type="mesh" mesh="bin_c5" class="touchable" group="3"/>
+      <geom name="bin_green_c6" type="mesh" mesh="bin_c6" class="touchable" group="3"/>
+      <geom name="bin_green_c7" type="mesh" mesh="bin_c7" class="touchable" group="3"/>
+      <geom name="bin_green_c8" type="mesh" mesh="bin_c8" class="touchable" group="3"/>
+      <geom name="bin_green_c9" type="mesh" mesh="bin_c9" class="touchable" group="3"/>
+      <geom name="bin_green_c10" type="mesh" mesh="bin_c10" class="touchable" group="3"/>
+      <geom name="bin_green_c11" type="mesh" mesh="bin_c11" class="touchable" group="3"/>
+    </body>
+    <body name="bin_blue" pos="0.32 -0.31 0.79">
+      <geom type="mesh" mesh="bin_visual" contype="0" conaffinity="0" density="0" material="blue_bin"/>
+      <geom name="bin_blue_c0" type="mesh" mesh="bin_c0" class="touchable" group="3"/>
+      <geom name="bin_blue_c1" type="mesh" mesh="bin_c1" class="touchable" group="3"/>
+      <geom name="bin_blue_c2" type="mesh" mesh="bin_c2" class="touchable" group="3"/>
+      <geom name="bin_blue_c3" type="mesh" mesh="bin_c3" class="touchable" group="3"/>
+      <geom name="bin_blue_c4" type="mesh" mesh="bin_c4" class="touchable" group="3"/>
+      <geom name="bin_blue_c5" type="mesh" mesh="bin_c5" class="touchable" group="3"/>
+      <geom name="bin_blue_c6" type="mesh" mesh="bin_c6" class="touchable" group="3"/>
+      <geom name="bin_blue_c7" type="mesh" mesh="bin_c7" class="touchable" group="3"/>
+      <geom name="bin_blue_c8" type="mesh" mesh="bin_c8" class="touchable" group="3"/>
+      <geom name="bin_blue_c9" type="mesh" mesh="bin_c9" class="touchable" group="3"/>
+      <geom name="bin_blue_c10" type="mesh" mesh="bin_c10" class="touchable" group="3"/>
+      <geom name="bin_blue_c11" type="mesh" mesh="bin_c11" class="touchable" group="3"/>
+    </body>
+
+    <!-- Cubes: 5 cm printed PLA, ~60 g with infill; positions are set at reset -->
+    <body name="cube0" pos="0.26 0.05 0.816">
+      <freejoint name="cube0_free"/>
+      <geom name="cube0" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="red"/>
+    </body>
+    <body name="cube1" pos="0.33 0.05 0.816">
+      <freejoint name="cube1_free"/>
+      <geom name="cube1" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="red"/>
+    </body>
+    <body name="cube2" pos="0.40 0.05 0.816">
+      <freejoint name="cube2_free"/>
+      <geom name="cube2" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="green"/>
+    </body>
+    <body name="cube3" pos="0.26 -0.05 0.816">
+      <freejoint name="cube3_free"/>
+      <geom name="cube3" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="green"/>
+    </body>
+    <body name="cube4" pos="0.33 -0.05 0.816">
+      <freejoint name="cube4_free"/>
+      <geom name="cube4" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="blue"/>
+    </body>
+    <body name="cube5" pos="0.40 -0.05 0.816">
+      <freejoint name="cube5_free"/>
+      <geom name="cube5" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="blue"/>
+    </body>
+  </worldbody>
+</mujoco>

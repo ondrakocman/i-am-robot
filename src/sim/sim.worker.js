@@ -97,6 +97,7 @@ function tick() {
         touching: [sim.touching[0], sim.touching[1]],
         resetProgress: Math.min(1, sim.resetTimer / COMMON.resetHold),
         goalMet: sim.goalMet,
+        taskLine: sim.task.hud ? sim.task.hud(sim) : '',
         rtf: perf.rtf,
         msPerStep: perf.msPerStep,
       },

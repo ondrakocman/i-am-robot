@@ -31,8 +31,13 @@ const SCENE_MATERIALS = {               // by geom-name prefix
   box: { roughness: 0.85 },                              // matte plastic
   bin: { roughness: 0.8 },
   tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 }, // brushed steel
-  parcel: { roughness: 0.95 },                           // cardboard
-  label: { roughness: 0.7 },
+  package: { roughness: 0.95 },                          // cardboard
+  tag: { roughness: 0.6 },
+  roller: { roughness: 0.4, metalness: 0.6 },
+  rail: { roughness: 0.45, metalness: 0.7 },
+  stop: { roughness: 0.6 },
+  bin: { roughness: 0.6 },
+  cube: { roughness: 0.55 },                             // 3D-printed PLA
 }
 const GHOST_SHOW_AT = 0.02   // m between the operator's wrist and the robot palm before the ghost appears
 const GHOST_FULL_AT = 0.06
@@ -391,7 +396,7 @@ function makeHud(instruction) {
     const [label, color] = STATUS_TEXT[info.status] ?? [info.status.toUpperCase(), '#ffffff']
     const lines = [
       label + (info.status === 'running' ? `  ${info.elapsed.toFixed(1)} s` : ''),
-      `episode ${info.episode}   saved ${saved.total} (${saved.success} ok)`,
+      (info.taskLine ? `${info.taskLine}   ·   ` : '') + `episode ${info.episode}   saved ${saved.total} (${saved.success} ok)`,
       `physics ${info.rtf.toFixed(2)}× real time · ${info.msPerStep.toFixed(2)} ms/step`,
     ]
     const key = lines.join('|') + color

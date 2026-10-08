@@ -1,7 +1,8 @@
 import tubeBox from './tube_box.js'
-import packageSort from './package_sort.js'
+import conveyor from './conveyor.js'
+import cubeSort from './cube_sort.js'
 
-export const TASKS = { [tubeBox.name]: tubeBox, [packageSort.name]: packageSort }
+export const TASKS = { [tubeBox.name]: tubeBox, [conveyor.name]: conveyor, [cubeSort.name]: cubeSort }
 export const DEFAULT_TASK = tubeBox.name
 
 export function getTask(name) {

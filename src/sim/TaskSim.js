@@ -3,9 +3,18 @@
 // logic, and records episodes. Pure JS: runs in the physics worker and in Node (scripts/sim-check.mjs).
 //
 // A task module (src/sim/tasks/*.js) provides:
-//   name, instruction (language instruction logged with each episode), title (short HUD text), scene (xml under public/), objects (free bodies, joint named `${body}_free`),
-//   dropZ, timeout, reset(sim, rng) -> layout, randomize?(rng) -> physics params, goal(sim) -> boolean,
-//   autopilot?(sim, t) -> per-hand grip targets for the scripted check.
+//   name, instruction (language instruction logged with each episode), title (short HUD text), scene (xml under
+//   public/), objects (free bodies, joint named `${body}_free`), timeout, reset(sim, rng) -> layout,
+//   randomize?(rng) -> physics params, sceneActuators (count of non-robot actuators, e.g. belt motors), and either
+//     goal(sim) -> boolean with dropZ   (static tasks: success once the goal holds with objects at rest and hands off)
+//   or
+//     update(sim) -> outcome | null     (dynamic tasks: called every control tick, runs its own spawning/scoring and
+//                                        returns 'success' / 'partial' / ... to end the episode)
+//   plus optional hud(sim) -> string for the panel, result(sim) -> per-episode scoring for the header,
+//   autopilot?(sim, t) -> per-hand grip targets, solved?(sim) for the headless check.
+//   Teleports done by a task while running must go through sim.teleportObject so replay can re-apply them.
+//   An event's `tick` is the index of the last frame recorded before the teleport: replay applies it after
+//   comparing that frame and before stepping on to the next.
 
 import { ArmIK, ARM_JOINTS } from './ik.js'
 import { EpisodeRecorder } from './episode.js'
@@ -206,6 +215,10 @@ export class TaskSim {
     this.readyGrip = this.arms.map(arm => Array.from(d.site_xpos.slice(3 * arm.gripSite, 3 * arm.gripSite + 3)))
 
     this.initialQpos = Array.from(d.qpos)
+    this.initialCtrl = Array.from(d.ctrl)
+    this.events = []
+    this.scheduled = []
+    this.frameIndex = 0
     this.peakArmVel = 0
     this.status = 'waiting' // until the operator's hands show up
     this.goalMet = false
@@ -235,6 +248,24 @@ export class TaskSim {
   }
 
   objectTouched(i) { return this.touch[2 * i] || this.touch[2 * i + 1] }
+
+  /** Runs fn right after frame `tick` is recorded, so any teleport it does lands on a frame boundary. */
+  scheduleAtFrame(tick, fn) { this.scheduled.push({ tick, fn }) }
+
+  /** z component of the object's own +z axis in the world: 1 upright, 0 on its side, -1 upside down. */
+  objectUp(i) {
+    const q = this.objects[i].q
+    const x = this.d.qpos[q + 4], y = this.d.qpos[q + 5]
+    return 1 - 2 * (x * x + y * y)
+  }
+
+  /** Teleports an object mid-episode (spawning / despawning) and logs it so replay can re-apply it. */
+  teleportObject(i, pos, quat = [1, 0, 0, 0]) {
+    const obj = this.objects[i]
+    this.d.qpos.set([...pos, ...quat], obj.q)
+    this.d.qvel.fill(0, obj.v, obj.v + 6)
+    if (this.status === 'running') this.events.push({ tick: this.frameIndex - 1, qpos_adr: obj.q, qpos: [...pos, ...quat], qvel_adr: obj.v })
+  }
 
   /** Applies randomized object properties { [objectName]: { mass?, friction? } }; also restores them for replay. */
   setPhysics(params) {
@@ -299,11 +330,16 @@ export class TaskSim {
       for (let k = 0; k < arm.fingerAct.length; k++) d.ctrl[arm.fingerAct[k]] = Math.fround(arm.fingerCmd[k])
     }
 
-    this.updateTask()
     if (this.status === 'running') {
       for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
       this.recorder.push([d.time - this.startTime, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
+      this.frameIndex++
+      for (const s of this.scheduled.splice(0)) {
+        if (s.tick === this.frameIndex - 1) s.fn()
+        else if (s.tick > this.frameIndex - 1) this.scheduled.push(s)
+      }
     }
+    this.updateTask() // teleports logged here come after the frame just recorded
   }
 
   // Same mapping the kinematic app used: thumb_0 is a signed rotation, everything else curls toward the
@@ -337,20 +373,29 @@ export class TaskSim {
     }
     contacts.delete()
 
-    this.goalMet = task.goal(this)
-    let settled = this.goalMet && !this.touching[0] && !this.touching[1]
-    let dropped = false
-    for (let i = 0; i < this.objects.length; i++) {
-      if (this.objectSpeed(i) > COMMON.restSpeed) settled = false
-      if (this.objectPos(i)[2] < task.dropZ) dropped = true
+    if (task.update) {
+      this.goalMet = false
+      if (this.status === 'running') {
+        const outcome = task.update(this)
+        if (outcome) this.endEpisode(outcome)
+        else if (d.time - this.startTime > task.timeout) this.endEpisode('timeout')
+      }
+    } else {
+      this.goalMet = task.goal(this)
+      let settled = this.goalMet && !this.touching[0] && !this.touching[1]
+      let dropped = false
+      for (let i = 0; i < this.objects.length; i++) {
+        if (this.objectSpeed(i) > COMMON.restSpeed) settled = false
+        if (this.objectPos(i)[2] < task.dropZ) dropped = true
+      }
+      if (this.status === 'running') {
+        this.successTimer = settled ? this.successTimer + cdt : 0
+        if (this.successTimer >= COMMON.successHold) this.endEpisode('success')
+        else if (dropped) this.endEpisode('dropped')
+        else if (d.time - this.startTime > task.timeout) this.endEpisode('timeout')
+      }
     }
-
-    if (this.status === 'running') {
-      this.successTimer = settled ? this.successTimer + cdt : 0
-      if (this.successTimer >= COMMON.successHold) this.endEpisode('success')
-      else if (dropped) this.endEpisode('dropped')
-      else if (d.time - this.startTime > task.timeout) this.endEpisode('timeout')
-    } else if (this.status !== 'waiting' && d.time - this.endTime > COMMON.endHold) {
+    if (this.status !== 'running' && this.status !== 'waiting' && d.time - this.endTime > COMMON.endHold) {
       this.reset()
       return
     }
@@ -393,7 +438,11 @@ export class TaskSim {
         peak_arm_velocity: this.peakArmVel,
         flags: this.peakArmVel > COMMON.fastMotion ? ['fast_motion'] : [],
         initial_qpos: this.initialQpos,
+        initial_ctrl: this.initialCtrl,
+        events: this.events,
+        result: task.result ? task.result(this) : undefined,
         nq: m.nq, nv: m.nv, nu: m.nu,
+        robot_nu: m.nu - (task.sceneActuators ?? 0),
         qpos_names: this.qposNames,
         qvel_names: this.qvelNames,
         actuator_names: this.actuatorNames,
