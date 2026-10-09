@@ -71,7 +71,8 @@ const ARM_SPEED = [3, 3, 3, 3, 5, 5, 5]
 // is blocked by contact the target stops running ahead, so the motor pushes with a bounded force and the
 // arm doesn't whip when it comes free. With kp=80 this caps the extra torque at ~10 Nm (wrist kp=40: ~5 Nm).
 const ARM_LEAD = 0.12
-// MuJoCo warning slots (mjtWarning order); a non-zero count means MuJoCo hit a bad state and reset the data
+// MuJoCo warning slots (mjtWarning order). bad_qpos/bad_qvel/bad_qacc mean MuJoCo found an invalid state and
+// reset the data; the others (constraint/contact buffer overflow, bad inertia or ctrl) corrupt the step.
 const WARNINGS = ['inertia', 'contact_full', 'constraint_full', 'bad_qpos', 'bad_qvel', 'bad_qacc', 'bad_ctrl']
 
 function mulberry32(seed) {
@@ -94,7 +95,7 @@ export class TaskSim {
    * @param opts.autopilot  drive the hands with the task's scripted demonstration (testing / desktop demo)
    * @param opts.meta       extra header fields (session id, asset hashes, app version)
    */
-  constructor(mj, m, task, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {}, armLead = ARM_LEAD } = {}) {
+  constructor(mj, m, task, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {} } = {}) {
     this.mj = mj
     this.m = m
     this.task = task
@@ -104,11 +105,8 @@ export class TaskSim {
     this.autopilot = autopilot && !!task.autopilot
     this.onEpisode = onEpisode
     this.meta = meta
-    this.armLead = armLead
 
-    const opt = m.opt
-    this.dt = opt.timestep
-    opt.delete()
+    this.dt = m.opt.timestep // m.opt is a reference view into the model: read it, never delete it
     if (!TIMESTEPS.some(t => Math.abs(t - this.dt) < 1e-9)) {
       throw new Error(`timestep ${this.dt} must be one of ${TIMESTEPS.join(', ')} so control stays at ${CONTROL_HZ} Hz`)
     }
@@ -184,8 +182,7 @@ export class TaskSim {
         inertia0: Array.from(m.body_inertia.slice(3 * body, 3 * body + 3)),
       }
     })
-    this.touch = new Uint8Array(2 * this.objects.length) // [object][hand]
-    this.touching = new Uint8Array(2)                     // any object, per hand
+    this.touching = new Uint8Array(2) // per hand: touching any task object
 
     this.qposNames = []
     this.qvelNames = []
@@ -238,11 +235,9 @@ export class TaskSim {
     this.raw.fill(0)
   }
 
-  requestReset() { this.pendingReset = true }
-
-  /** Ends a running episode as 'aborted' and resets; used when the XR session ends. */
-  abort() {
-    if (this.status === 'running') this.endEpisode('aborted')
+  /** Ends a running episode (default outcome 'aborted') and resets; used when the XR session ends or recenters. */
+  abort(outcome = 'aborted') {
+    if (this.status === 'running') this.endEpisode(outcome)
     this.pendingReset = true
   }
 
@@ -427,7 +422,7 @@ export class TaskSim {
           const lim = ARM_SPEED[k] * this.controlDt
           arm.qCmd[k] += Math.max(-lim, Math.min(lim, q[qadr[k]] - arm.qCmd[k]))
           const actual = d.qpos[qadr[k]]
-          arm.qCmd[k] = Math.max(actual - this.armLead, Math.min(actual + this.armLead, arm.qCmd[k]))
+          arm.qCmd[k] = Math.max(actual - ARM_LEAD, Math.min(actual + ARM_LEAD, arm.qCmd[k]))
         }
         for (let k = 0; k < FINGER_JOINTS.length; k++) arm.fingerCmd[k] = this.fingerTarget(arm, k, input[o + 8 + k])
       }
@@ -438,13 +433,14 @@ export class TaskSim {
 
     this.scanContacts()
     if (this.status === 'running') {
+      // A MuJoCo warning during the last steps means the state is reset/corrupt: end before recording it
+      if (this.readWarnings()) { this.endEpisode('unstable'); return }
       for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
-      this.recorder.push([d.time - this.startTime, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
+      this.recorder.push([this.frameIndex * this.controlDt, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
       this.lastQpos.set(d.qpos)
       this.lastQvel.set(d.qvel)
       this.frameIndex++
       this.untrackedFor = anyTracked ? 0 : this.untrackedFor + this.controlDt
-      if (this.readWarnings()) { this.endEpisode('unstable'); return }
       if (this.untrackedFor > COMMON.untrackedTimeout) { this.endEpisode('lost_tracking'); return }
       for (const s of this.scheduled.splice(0)) {
         if (s.tick === this.frameIndex - 1) s.fn()
@@ -464,10 +460,9 @@ export class TaskSim {
     return Math.max(lo, Math.min(hi, target))
   }
 
-  /** Which hand touches which task object, from the current contact list. */
+  /** Which hand touches any task object, from the current contact list. */
   scanContacts() {
     const { m, d } = this
-    this.touch.fill(0)
     this.touching.fill(0)
     const contacts = d.contact
     for (let i = 0, n = contacts.size(); i < n; i++) {
@@ -478,9 +473,7 @@ export class TaskSim {
       const obj = o1 >= 0 ? o1 : o2
       if (obj < 0) continue
       const hand = this.handOfBody[m.geom_bodyid[o1 >= 0 ? g2 : g1]]
-      if (hand < 0) continue
-      this.touch[2 * obj + hand] = 1
-      this.touching[hand] = 1
+      if (hand >= 0) this.touching[hand] = 1
     }
     contacts.delete()
   }
@@ -526,11 +519,13 @@ export class TaskSim {
 
   /** Ends the running episode. Returns true if it was handed to onEpisode (long enough to keep). */
   endEpisode(outcome) {
-    const { m, d, task } = this
+    const { m, task } = this
     this.status = outcome
-    this.endTime = d.time
-    const duration = d.time - this.startTime
-    if (!this.onEpisode || duration < COMMON.minEpisode) return false
+    this.endTime = this.d.time
+    // from recorded frames, not d.time: MuJoCo's auto-reset on an unstable state sends d.time back to 0
+    const duration = Math.max(0, this.recorder.frames - 1) * this.controlDt
+    if (!this.onEpisode || this.recorder.frames === 0) return false
+    if (duration < COMMON.minEpisode && outcome !== 'unstable') return false
     const frames = this.recorder.snapshot()
     const flags = []
     if (this.peakArmVel > COMMON.fastMotion) flags.push('fast_motion')

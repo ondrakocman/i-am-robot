@@ -77,9 +77,10 @@ export default function App() {
     const count = document.getElementById('episode-count')
     const download = document.getElementById('download-episodes')
     const clear = document.getElementById('clear-episodes')
-    const unsubscribe = onEpisodesChanged(({ total, success }) => {
-      count.textContent = total ? `${total} episodes recorded (${success} successful)` : 'No episodes recorded yet'
-      download.disabled = clear.disabled = total === 0
+    const unsubscribe = onEpisodesChanged(({ total, success, unsaved }) => {
+      count.textContent = (total ? `${total} episodes recorded (${success} successful)` : 'No episodes recorded yet')
+        + (unsaved ? ` — ${unsaved} could not be stored, download now` : '')
+      download.disabled = clear.disabled = total + unsaved === 0
     })
     const onDownload = async () => {
       try {

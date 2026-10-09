@@ -32,8 +32,8 @@ const readFile = async p => (p.endsWith('.xml') ? fs.readFile(path.join(PUBLIC, 
 const { model: m, assets } = await loadScene(mj, readFile, { scene: task.scene, timestep })
 const MUJOCO_VERSION = JSON.parse(await fs.readFile(new URL('../node_modules/@mujoco/mujoco/package.json', import.meta.url))).version
 const base = compiledPhysics(m) // before anything randomizes the model, like the headset's fresh load
-// d.warning is a reference view into MjData (unlike d.contact): read it, never delete it
-const warningCount = d => { const w = d.warning; let n = 0; for (let i = 0; i < w.size(); i++) n += w.get(i).number; return n }
+// d.warning is a reference view into MjData: its elements may be deleted, the vector itself must not be
+const warningCount = d => { const w = d.warning; let n = 0; for (let i = 0; i < w.size(); i++) { const x = w.get(i); n += x.number; x.delete() } return n }
 console.log(`task ${task.name}  timestep ${timestep}  nq=${m.nq} nv=${m.nv} nu=${m.nu} nbody=${m.nbody}`)
 
 // 1. episodes (the recording sim is built on the fresh model, as on the headset)
@@ -48,7 +48,8 @@ let steps = 0
 let solvedFor = 0
 while (episodes.length < runs && steps < runs * (task.timeout + 5) / sim.dt) {
   if (!task.autopilot && sim.status === 'waiting') {
-    // a "tracked" idle hand starts the episode; SOLVE_AT_S in, the objects are teleported into the goal
+    // a tracked left hand (held at its ready grip point) starts the episode; SOLVE_AT_S in, the objects are
+    // teleported into the goal
     sim.input.fill(0); sim.input[0] = 1; sim.input.set([...sim.readyGrip[0], 1, 0, 0, 0], 1)
     if (solvedFor !== sim.episode) { sim.scheduleAtFrame(Math.round(SOLVE_AT_S / sim.controlDt), () => task.solved(sim)); solvedFor = sim.episode }
   }
@@ -76,7 +77,41 @@ for (const { header, frames } of episodes) {
   else console.log(`episode ${header.episode} replay: all ${r.frames} frames match bit-for-bit`)
 }
 
-// 3. reset validity over many seeds (each TaskSim re-randomizes the shared model; fine after the replays)
+// 3. an unstable state must end the episode as 'unstable', flagged, keeping the frames recorded before it
+{
+  const got = []
+  const probe = new TaskSim(mj, m, task, { seed: 11, autopilot: true, onEpisode: e => got.push(e) })
+  probe.input.fill(0); probe.input[0] = 1; probe.input.set([...probe.readyGrip[0], 1, 0, 0, 0], 1)
+  probe.scheduleAtFrame(50, () => { probe.d.qvel[probe.objects[0].v] = NaN })
+  while (!got.length && probe.steps < 10 / probe.dt) probe.step()
+  const h = got[0]?.header
+  if (!h) fail('NaN injection did not produce an episode')
+  else if (h.outcome !== 'unstable' || !h.flags.includes('unstable') || h.frames !== 51 || !h.mujoco_warnings.bad_qvel) {
+    fail(`NaN injection gave outcome ${h?.outcome}, flags ${h?.flags}, ${h?.frames} frames, warnings ${JSON.stringify(h?.mujoco_warnings)}`)
+  } else console.log(`instability check: 'unstable' episode with ${h.frames} clean frames`)
+  probe.dispose()
+}
+
+// 4. every goal region must be reachable by the hand that serves it (IK on the kinematic model)
+if (task.reachTargets) {
+  const probe = new TaskSim(mj, m, task, { seed: 1 })
+  for (const { side, point, tolerance = 0.02 } of task.reachTargets(probe)) {
+    const arm = probe.arms[side]
+    const ik = probe.ikData
+    mj.mj_resetData(m, ik)
+    arm.ik.qadr.forEach((a, k) => { ik.qpos[a] = arm.ready[k] })
+    const palm = [point[0] - probe.gripOffset[side][0], point[1] - probe.gripOffset[side][1], point[2] - probe.gripOffset[side][2]]
+    for (let i = 0; i < 80; i++) arm.ik.solve(mj, ik, palm, [1, 0, 0, 0], { iterations: 1 })
+    mj.mj_kinematics(m, ik)
+    const s = 3 * arm.gripSite
+    const err = Math.hypot(ik.site_xpos[s] - point[0], ik.site_xpos[s + 1] - point[1], ik.site_xpos[s + 2] - point[2])
+    if (err > tolerance) fail(`${arm.side} hand cannot reach goal point ${point.map(v => v.toFixed(2))} (${(err * 100).toFixed(1)} cm off)`)
+  }
+  if (!failures) console.log(`reach check: ${task.reachTargets(probe).length} goal points within tolerance`)
+  probe.dispose()
+}
+
+// 5. reset validity over many seeds (each TaskSim re-randomizes the shared model; fine after the replays)
 let worst = 0
 for (let seed = 1; seed <= seeds; seed++) {
   const probe = new TaskSim(mj, m, task, { seed })

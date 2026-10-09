@@ -1,4 +1,4 @@
-# Offline tools (scripts/*.py); Python >= 3.9. Pinned so regenerated assets match the committed ones.
+# Offline tools (scripts/*.py); Python >= 3.11 (numpy 2.4). Pinned so regenerated assets match the committed ones.
 numpy==2.4.2
 trimesh==4.12.2
 coacd==1.0.7

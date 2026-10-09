@@ -7,14 +7,15 @@
     for ep in load_episodes('episodes.iamr'):
         ep['header']['task'], ep['header']['outcome'], ep['action'].shape, ep['qpos'].shape
 
-Each episode is a dict with the JSON header under 'header' and one float32 array of shape (frames, size) per
-recorded field, at header['control_hz'] (50 Hz):
+Each episode is a dict with the JSON header under 'header' and one read-only float32 array of shape
+(frames, size) per recorded field, at header['control_hz'] (50 Hz):
   time      seconds since the episode started
   action    actuator targets (= what a policy should output). The first header['robot_nu'] entries are the
             robot's, in header['actuator_names'] order (waist x3, then per arm: 7 arm joints followed by 7 hand
             joints; note the two hands list their fingers in different orders). Any remaining entries are scene
             actuators (conveyor belt motors).
-  qpos/qvel full simulation state incl. the free objects, named in header['qpos_names'] / ['qvel_names']
+  qpos/qvel full simulation state incl. the free objects, named in header['qpos_names'] / ['qvel_names'];
+            a free object's angular velocity (wx, wy, wz) is in the object's body frame, MuJoCo convention
   input     retargeted operator command per hand: tracked, palm pos (3), palm quat wxyz (4), 7 finger commands
   raw       viewer (head) pose (pos 3 + quat wxyz 4) then 25 WebXR joints per hand (pos 3 + quat wxyz 4), all
             in the robot frame; an untracked joint is all zeros
@@ -46,6 +47,11 @@ def load_episodes(path):
         o += 8 + header_bytes
         (data_bytes,) = struct.unpack_from('<I', data, o)
         o += 4
+        if o + data_bytes > len(data):
+            raise ValueError(f'truncated file: episode {header["episode"]} is incomplete')
+        if data_bytes != header['frames'] * header['frame_size'] * 4:
+            raise ValueError(f'episode {header["episode"]}: data size does not match header')
+        # read-only views into the file bytes; .copy() before modifying
         frames = np.frombuffer(data, '<f4', data_bytes // 4, o).reshape(-1, header['frame_size'])
         o += data_bytes
         ep = {'header': header}

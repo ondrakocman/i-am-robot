@@ -8,6 +8,7 @@ import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
 import { XR_JOINT_NAMES, ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
 import { HAND_INPUT, INPUT_SIZE, RAW_SIZE } from '../sim/TaskSim.js'
 import { saveEpisode, onEpisodesChanged, requestPersistence } from '../sim/episodeStore.js'
+import { TASKS } from '../sim/tasks/index.js'
 
 const params = new URLSearchParams(location.search)
 const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
@@ -78,7 +79,7 @@ export function MujocoScene() {
   const [world, setWorld] = useState(null)
   const latest = useRef(null)
   // What the HUD knows about storage: committed counts plus in-flight / failed saves
-  const saves = useRef({ total: 0, success: 0, pending: 0, failed: 0, persistent: null, error: null })
+  const saves = useRef({ total: 0, success: 0, unsaved: 0, pending: 0, persistent: null, error: null, stalled: false })
   const xr = useRef({ session: null, refSpace: null, onReset: null, calibrated: false, hands: [newHandState(), newHandState()] })
   const input = useRef({ input: new Float32Array(INPUT_SIZE), raw: new Float32Array(RAW_SIZE) })
   const lastState = useRef({ at: 0, info: null })
@@ -105,7 +106,7 @@ export function MujocoScene() {
       } else if (data.type === 'episode') {
         saves.current.pending++
         saveEpisode(data.header, data.buffer)
-          .catch(err => { saves.current.failed++; console.error('[episodes] save failed', err) })
+          .catch(err => console.error('[episodes] save failed, kept in memory for download', err))
           .finally(() => { saves.current.pending-- })
       } else if (data.type === 'error') {
         fail(data.message)
@@ -118,7 +119,7 @@ export function MujocoScene() {
       timestep: Number(params.get('dt')) || undefined,
       autopilot: params.has('autopilot'),
       session: SESSION_ID,
-      task: params.get('task') || undefined,
+      task: TASKS[params.get('task')] ? params.get('task') : undefined, // unknown names fall back like the selector
       appVersion: __GIT_SHA__,
     })
     const unsubscribe = onEpisodesChanged(s => Object.assign(saves.current, s))
@@ -158,21 +159,7 @@ export function MujocoScene() {
     if (world) world.headMeshes.forEach(m => { m.visible = !hideHead })
   }, [world])
 
-  useFrame((_state, delta, xrFrame) => {
-    if (!world) return
-    const s = latest.current
-    if (s) {
-      latest.current = null
-      applyBodies(world, s.bodies)
-      workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies }, [s.bodies.buffer])
-      applyInfo(world, s.info, saves.current)
-    } else if (lastState.current.info && performance.now() - lastState.current.at > STALL_MS) {
-      // the worker stopped posting (crashed tick, throttled tab): say so on the in-VR panel, not just the DOM
-      if (!saves.current.error) saves.current.error = 'PHYSICS STALLED — reload the page'
-      world.hud.draw(lastState.current.info, saves.current)
-    }
-    if (!xrFrame) return
-
+  function readXR(xrFrame, delta, world) {
     const session = gl.xr.getSession()
     const refSpace = gl.xr.getReferenceSpace()
     if (!session || !refSpace) return
@@ -180,19 +167,20 @@ export function MujocoScene() {
     if (st.session !== session) {
       st.session = session
       st.calibrated = false
-      st.hands.forEach(h => { h.lastSeen = -Infinity })
+      st.hands.forEach(h => { h.lastSeen = -Infinity; h.hand = null })
       // Leaving VR, or taking the headset off (the session goes hidden), ends the running episode; the
       // worker's input watchdog also stops the hands
-      const abort = () => workerRef.current?.postMessage({ type: 'abort' })
-      session.addEventListener('end', abort, { once: true })
-      session.addEventListener('visibilitychange', () => { if (session.visibilityState === 'hidden') abort() })
+      const abort = outcome => workerRef.current?.postMessage({ type: 'abort', outcome })
+      session.addEventListener('end', () => abort('aborted'), { once: true })
+      session.addEventListener('visibilitychange', () => { if (session.visibilityState === 'hidden') abort('aborted') })
     }
     if (st.refSpace !== refSpace) {
       st.refSpace?.removeEventListener('reset', st.onReset)
       st.refSpace = refSpace
       st.calibrated = false
-      // Quest "recenter": the reference space moves, so the world must be placed again
-      st.onReset = () => { st.calibrated = false }
+      // Quest "recenter": the reference space moves, so the world is placed again and a running episode
+      // (whose input would jump) is ended as 'recentered'
+      st.onReset = () => { st.calibrated = false; workerRef.current?.postMessage({ type: 'abort', outcome: 'recentered' }) }
       refSpace.addEventListener('reset', st.onReset)
     }
 
@@ -209,8 +197,34 @@ export function MujocoScene() {
 
     const { input: inp, raw } = input.current
     readOperator(xrFrame, session, refSpace, world, st.hands, delta, inp, raw)
+    saves.current.xrError = null
     workerRef.current?.postMessage({ type: 'input', input: inp, raw })
+  }
+
+  useFrame((_state, delta, xrFrame) => {
+    if (!world) return
+    const s = latest.current
+    if (s) {
+      latest.current = null
+      saves.current.stalled = false
+      applyBodies(world, s.bodies)
+      workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies }, [s.bodies.buffer])
+      applyInfo(world, s.info, saves.current)
+    } else if (lastState.current.info && performance.now() - lastState.current.at > STALL_MS) {
+      // the worker stopped posting (crashed tick, throttled tab): say so on the in-VR panel, not just the DOM
+      saves.current.stalled = true
+      world.hud.draw(lastState.current.info, saves.current)
+    }
+    if (!xrFrame) return
+    try {
+      readXR(xrFrame, delta, world)
+    } catch (err) {
+      // one bad XR call (a stale space, a session in transition) must not end the render loop
+      console.error('[xr]', err)
+      saves.current.xrError = err.message
+    }
   })
+
 
   return (
     <>
@@ -431,6 +445,8 @@ const STATUS_TEXT = {
   timeout: ['TIMEOUT — RESETTING', '#ffb35d'],
   lost_tracking: ['HANDS LOST — RESETTING', '#ffb35d'],
   unstable: ['PHYSICS UNSTABLE — RESETTING', '#ff5d5d'],
+  recentered: ['RECENTERED — RESETTING', '#9fb4c8'],
+  error: ['PHYSICS ERROR', '#ff5d5d'],
   aborted: ['RESET', '#9fb4c8'],
 }
 
@@ -450,8 +466,11 @@ function makeHud(instruction) {
   const draw = (info, saves) => {
     const now = performance.now()
     if (now - lastDraw < 1000 / HUD_HZ) return
-    const [label, color] = saves.error ? [saves.error, '#ff5d5d'] : STATUS_TEXT[info.status] ?? [info.status.toUpperCase(), '#ffffff']
-    const storage = saves.failed ? `SAVE FAILED ×${saves.failed}` : saves.pending ? 'saving…' : `saved ${saves.total} (${saves.success} ok)`
+    const [label, color] = saves.error ? [saves.error, '#ff5d5d']
+      : saves.stalled ? ['PHYSICS NOT RESPONDING', '#ff5d5d']
+      : saves.xrError ? ['TRACKING ERROR', '#ffb35d']
+      : STATUS_TEXT[info.status] ?? [info.status.toUpperCase(), '#ffffff']
+    const storage = saves.unsaved ? `${saves.unsaved} NOT SAVED (download now)` : saves.pending ? 'saving…' : `saved ${saves.total} (${saves.success} ok)`
     const lines = [
       label + (info.status === 'running' ? `  ${Math.floor(info.elapsed)} s` : ''),
       (info.taskLine ? `${info.taskLine}   ·   ` : '') + `episode ${info.episode}   ${storage}`,
@@ -472,7 +491,7 @@ function makeHud(instruction) {
     ctx.fillStyle = color
     ctx.font = '700 64px system-ui, sans-serif'
     ctx.fillText(lines[0], 56, 228)
-    ctx.fillStyle = saves.failed ? '#ff5d5d' : '#c8d4e0'
+    ctx.fillStyle = saves.unsaved ? '#ff5d5d' : '#c8d4e0'
     ctx.font = '400 40px system-ui, sans-serif'
     ctx.fillText(lines[1], 56, 338)
     ctx.fillStyle = info.rtf < 0.95 || saves.persistent === false ? '#ffb35d' : '#7f93a6'
@@ -546,6 +565,7 @@ function newHandState() {
     fingers: new RetargetingFilter(),
     corrected: new THREE.Quaternion(),
     lastSeen: -Infinity,
+    hand: null, // the XRHand the cached joint spaces belong to
   }
 }
 
@@ -573,11 +593,11 @@ function readOperator(xrFrame, session, refSpace, world, hands, dt, input, raw) 
     const s = source.handedness === 'left' ? 0 : source.handedness === 'right' ? 1 : -1
     if (s < 0) continue
     const h = hands[s]
-    seen[s] = true
     const joints = readHandJoints(xrFrame, source.hand, refSpace, h)
     XR_JOINT_NAMES.forEach((name, i) => { if (joints[name]) writePose(joints[name].position, joints[name].quaternion, raw, 7 + s * RAW_HAND + 7 * i) })
     const wrist = joints.wrist
     if (!wrist) continue
+    seen[s] = true
 
     // Re-acquired after a dropout: start the filters fresh instead of sweeping from the old pose
     if (now - h.lastSeen > HAND_DROPOUT_S) { h.pos.reset(); h.quat.reset(); h.fingers.reset() }
@@ -603,7 +623,9 @@ function readOperator(xrFrame, session, refSpace, world, hands, dt, input, raw) 
 // All 25 joints in one call where the browser supports it (fillPoses), else one getJointPose per joint
 function readHandJoints(xrFrame, hand, refSpace, h) {
   const joints = {}
-  if (!h.spaces) {
+  if (h.hand !== hand) {
+    // a new XRSession (or a replaced input source) brings new XRJointSpaces; stale ones throw
+    h.hand = hand
     h.spaces = XR_JOINT_NAMES.map(n => hand.get(n))
     h.poses = new Float32Array(XR_JOINT_NAMES.length * 16)
     h.matrix = new THREE.Matrix4()

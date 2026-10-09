@@ -25,7 +25,7 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
-      - run: pip install numpy
+      - run: pip install numpy==2.4.2
       - run: npm run lint
       - run: node scripts/sim-check.mjs tube_box n=2 out=/tmp/tube_box.iamr
       - run: node scripts/sim-check.mjs conveyor n=2 out=/tmp/conveyor.iamr
@@ -34,7 +34,12 @@ jobs:
       - run: cat /tmp/tube_box.iamr /tmp/conveyor.iamr /tmp/cube_sort.iamr > /tmp/all.iamr
       - run: node scripts/replay.mjs /tmp/all.iamr /tmp/poses.ndjson
       - run: python3 scripts/load_episodes.py /tmp/all.iamr
+      - run: node scripts/unit-tests.mjs
       - run: npm run build
+      - uses: actions/upload-pages-artifact@v3
+        if: github.event_name != 'pull_request'
+        with:
+          path: dist
 
   deploy:
     needs: check
@@ -51,15 +56,6 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-      - run: npm ci
-      - run: npm run build
-      - uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
+      # deploys exactly the build the check job verified
       - id: deployment
         uses: actions/deploy-pages@v4

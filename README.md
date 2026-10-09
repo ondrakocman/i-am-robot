@@ -35,9 +35,10 @@ Pick the task on the landing page (or `?task=`):
 
 Static tasks succeed when the goal holds with every object at rest and both hands off them for 0.5 s; the
 conveyor task ends once every package has been scored (delivered or dropped), `success` only if all were
-tag-up. Episodes also end on a drop, a timeout, 5 s without tracked hands, leaving VR, or a MuJoCo instability
-(saved with outcome `unstable`). Then the episode is saved and the scene re-randomizes (object placement, mass,
-friction, belt speed), all logged.
+tag-up. Episodes also end on a drop, a timeout, 5 s without tracked hands (`lost_tracking`), leaving VR
+(`aborted`), a headset recenter (`recentered`), or a MuJoCo instability (`unstable`, keeping the frames recorded
+before it). Then the episode is saved and the scene re-randomizes (object placement, mass, friction, belt
+speed), all logged.
 
 Adding a task: one module in `src/sim/tasks/` (scene XML, object list, `reset`/`randomize`, `goal` or `update`,
 optional `solved` for the headless check) and a line in `tasks/index.js`.
@@ -65,7 +66,8 @@ Per episode, at 50 Hz: `action` (actuator targets; the first `robot_nu` are the 
 order: waist ×3, then per arm 7 arm joints followed by 7 hand joints; the two hands list their fingers in
 different orders, so slice by name), `qpos`/`qvel` (full simulation state including the objects), `input`
 (retargeted operator command), `raw` (head pose and all 25 WebXR joints per hand, zero when untracked),
-`touching`. The header holds the task and its language instruction, layout, seed, outcome and per-task result,
+`touching`. Free-object angular velocities in `qvel` are in the object's body frame (MuJoCo convention); the
+Python loader returns read-only views. The header holds the task and its language instruction, layout, seed, outcome and per-task result,
 randomized `physics`, logged teleport `events`, initial and final state, `peak_arm_velocity`, MuJoCo warning
 counters and `flags` (`fast_motion` above 6 rad/s, `slow_physics` if the headset fell below 0.9× real time,
 `unstable`), the real-time factor during the episode, SHA-256 hashes of every model file, and the app commit
@@ -99,10 +101,12 @@ data, so get consent before sharing datasets recorded by others.
 - `src/sim/sim.worker.js` real-time stepping off the render thread; `src/components/MujocoScene.jsx` rendering,
   hand tracking, calibration, HUD
 - `src/sim/tasks/` task modules; `public/mujoco/` scenes; `public/models/` meshes
-- `scripts/sim-check.mjs` headless gate (reset validity, task success, bit-exact replay, MuJoCo warnings);
+- `scripts/sim-check.mjs` headless gate (task success, bit-exact replay, instability handling, goal
+  reachability, reset validity); `scripts/unit-tests.mjs` (frame conversions, retargeting, file round trip);
   `scripts/replay.mjs`; `scripts/load_episodes.py`
 - `scripts/build-g1-mjcf.py`, `scripts/build-conveyor-scene.py`, `scripts/decimate-meshes.py`,
-  `scripts/convert-object.py` regenerate the generated assets (`pip install -r requirements.txt`, Python ≥ 3.9;
-  decimation and convex decomposition are only reproducible with the pinned versions)
+  `scripts/convert-object.py` regenerate the generated assets (`pip install -r requirements.txt`, Python ≥ 3.11;
+  decimation and convex decomposition are only reproducible with the pinned versions); `assets/` holds source
+  models that are not served
 
 License: MIT (see `LICENSE`); third-party assets in `THIRD_PARTY.md`.

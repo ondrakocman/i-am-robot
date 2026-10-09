@@ -32,6 +32,8 @@ export function decodeEpisodes(buffer) {
     o += 8 + headerBytes
     const dataBytes = view.getUint32(o, true)
     o += 4
+    if (o + dataBytes > buffer.byteLength) throw new Error(`truncated file: episode at byte ${o - 12 - headerBytes} is incomplete`)
+    if (dataBytes !== header.frames * header.frame_size * 4) throw new Error(`episode ${header.episode}: data size does not match header (${dataBytes} bytes for ${header.frames} frames of ${header.frame_size})`)
     // copy so the frames are 4-byte aligned regardless of the chunk offset
     const frames = new Float32Array(buffer.slice(o, o + dataBytes))
     o += dataBytes

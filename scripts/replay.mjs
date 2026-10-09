@@ -23,7 +23,8 @@ if (!file) { console.error('usage: node scripts/replay.mjs <episodes.iamr> [pose
 
 const mj = await loadMujoco()
 const readFile = async p => (p.endsWith('.xml') ? fs.promises.readFile(path.join(PUBLIC, p), 'utf8') : new Uint8Array(await fs.promises.readFile(path.join(PUBLIC, p))))
-const episodes = decodeEpisodes((await fs.promises.readFile(file)).buffer)
+const bytes = await fs.promises.readFile(file)
+const episodes = decodeEpisodes(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)) // Buffer may be a pooled slice
 const models = new Map() // `${scene}|${timestep}` -> compiled model, asset hashes, compiled physics
 const sink = out ? fs.createWriteStream(out) : null
 let failures = 0

@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Generate public/mujoco/conveyor.xml (two driven roller conveyors and a pool of packages) and
 src/sim/tasks/conveyor.layout.js (the numbers the task module needs), so scene and task never disagree.
-Roller pitch is 3 cm so even the shortest package (8 cm) always rests on two or three rollers; packages on a single
-roller seesaw and stall."""
+Roller pitch is 3 cm so a package always rests on at least two rollers whichever face is down (the shortest edge is
+5 cm); packages balanced on a single roller seesaw and stall."""
 import json
 from pathlib import Path
 

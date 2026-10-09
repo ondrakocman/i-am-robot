@@ -3,9 +3,10 @@
 const CUBES = ['red', 'red', 'green', 'green', 'blue', 'blue']
 const CUBE_HALF = 0.025
 const CUBE_Z = 0.79 + CUBE_HALF + 0.001
-// Spawn slots on the table in front of the robot, clear of the bins (green bin starts at x=0.39): a 2 x 3 grid
-// 9 x 12 cm apart with +-8 mm jitter keeps centres > 7.4 cm apart, more than a yawed cube's diagonal (7.1 cm)
-const SLOT_X = [0.24, 0.33]
+// Spawn slots on the table in front of the robot, clear of the bins (the green bin's wall starts at x=0.34; a
+// yawed cube reaches 3.5 cm from its centre): a 2 x 3 grid 9 x 12 cm apart with +-8 mm jitter keeps centres
+// > 7.4 cm apart, more than two half-diagonals (7.1 cm), so neighbours never overlap
+const SLOT_X = [0.20, 0.29]
 const SLOT_Y = [-0.12, 0, 0.12]
 const JITTER = 0.008
 const YAW_JITTER = 0.8
@@ -58,6 +59,17 @@ export default {
       const [bx, by] = sim.layout.bins[color]
       return Math.abs(x - bx) < BIN_INNER[0] && Math.abs(y - by) < BIN_INNER[1] && z < BIN_MAX_Z
     })
+  },
+
+  // Where a hand must be able to let go for the goal to be achievable: above each bin's near half
+  reachTargets(sim) {
+    const { bins } = sim.layout
+    return [
+      { side: 0, point: [bins.red[0], bins.red[1], 0.95] },
+      { side: 1, point: [bins.blue[0], bins.blue[1], 0.95] },
+      { side: 0, point: [bins.green[0] - 0.04, bins.green[1] + 0.03, 0.95] },
+      { side: 1, point: [bins.green[0] - 0.04, bins.green[1] - 0.03, 0.95] },
+    ]
   },
 
   // Headless check: cubes placed in their bins

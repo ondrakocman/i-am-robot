@@ -5,7 +5,7 @@ Usage: python3 scripts/build-g1-mjcf.py /path/to/mujoco_menagerie/unitree_g1
 
 The Menagerie commit of the checkout used is recorded in the output file's first line. The robot meshes are
 copied from Menagerie's assets folder into public/models/meshes (overwriting), then decimated separately by
-scripts/decimate-meshes.py. Requires Python >= 3.9.
+scripts/decimate-meshes.py. Requires Python >= 3.11 (see requirements.txt).
 
 Changes vs. the Menagerie model (BSD-3, see public/mujoco/LICENSE-g1):
   - fixed base: pelvis freejoint removed (upper-body manipulation, like Isaac's FixedBaseUpperBodyIK task)

@@ -1,5 +1,5 @@
 // Physics worker: runs MuJoCo (WASM) in real time off the render thread.
-//   main -> worker: init, input (operator hands, every XR frame), abort (XR session ended)
+//   main -> worker: init, input (operator hands, every XR frame), abort (XR session ended / recentered)
 //   worker -> main: ready (scene description for rendering), state (body poses ~120 Hz), episode, error
 
 import loadMujoco from '@mujoco/mujoco'
@@ -34,7 +34,7 @@ self.onmessage = ({ data: msg }) => {
       lastInput = performance.now()
       break
     case 'abort':
-      sim?.abort()
+      sim?.abort(msg.outcome)
       sim?.clearInput()
       break
     case 'state-buffer':
@@ -72,7 +72,16 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
     timestep: sim.dt,
   }, transfer)
   lastTick = perf.windowStart = performance.now()
-  setInterval(tick, TICK_MS)
+  const interval = setInterval(() => {
+    try {
+      tick()
+    } catch (err) {
+      // a task bug or embind abort: keep what was recorded, report once, and stop instead of throwing every 4 ms
+      clearInterval(interval)
+      try { if (sim.status === 'running') sim.endEpisode('error') } catch { /* the data itself may be gone */ }
+      self.postMessage({ type: 'error', message: String(err?.stack ?? err) })
+    }
+  }, TICK_MS)
 }
 
 function tick() {

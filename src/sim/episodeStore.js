@@ -21,7 +21,7 @@ function db() {
       resolve(d)
     }
     req.onerror = () => { dbPromise = null; reject(req.error) }
-    req.onblocked = () => reject(new Error('IndexedDB upgrade blocked by another tab'))
+    req.onblocked = () => { dbPromise = null; reject(new Error('IndexedDB upgrade blocked by another tab')) }
   })
   return dbPromise
 }
@@ -39,9 +39,11 @@ function run(mode, fn) {
 
 const listeners = new Set()
 let stats = null
+// Episodes IndexedDB refused (quota, eviction, blocked upgrade) are kept here so a download still gets them
+const unsaved = []
 async function refreshStats() {
   const [total, success] = await Promise.all([run('readonly', s => s.count()), run('readonly', s => s.index('success').count(IDBKeyRange.only(1)))])
-  stats = { total, success }
+  stats = { total, success, unsaved: unsaved.length }
   listeners.forEach(fn => fn(stats))
   return stats
 }
@@ -60,20 +62,29 @@ export async function requestPersistence() {
   return (await navigator.storage.persisted()) || navigator.storage.persist()
 }
 
-/** Resolves once the episode is committed to disk; rejects (e.g. quota exceeded) otherwise. */
+/**
+ * Resolves once the episode is committed to disk. If IndexedDB refuses it (quota, eviction), the episode is
+ * kept in memory for the next download and the promise rejects so the UI can say so.
+ */
 export async function saveEpisode(header, buffer) {
-  // the success index needs a key, so booleans are stored as 0/1
-  await run('readwrite', s => s.add({ header, success: header.success ? 1 : 0, task: header.task, data: new Blob([buffer]) }))
-  if (stats) {
-    stats = { total: stats.total + 1, success: stats.success + (header.success ? 1 : 0) }
-    listeners.forEach(fn => fn(stats))
+  const data = new Blob([buffer])
+  try {
+    // the success index needs a key, so booleans are stored as 0/1
+    await run('readwrite', s => s.add({ header, success: header.success ? 1 : 0, task: header.task, data }))
+    if (stats) stats = { ...stats, total: stats.total + 1, success: stats.success + (header.success ? 1 : 0) }
+  } catch (err) {
+    unsaved.push(data)
+    if (stats) stats = { ...stats, unsaved: unsaved.length }
+    throw err
+  } finally {
+    if (stats) listeners.forEach(fn => fn(stats))
   }
 }
 
-/** One Blob of every stored episode, in recording order. */
+/** One Blob of every stored episode in recording order, followed by any the database refused. */
 export async function exportEpisodes() {
   const all = await run('readonly', s => s.getAll())
-  return new Blob(all.map(e => e.data), { type: 'application/octet-stream' })
+  return new Blob([...all.map(e => e.data), ...unsaved], { type: 'application/octet-stream' })
 }
 
 export async function clearEpisodes() {

@@ -110,6 +110,15 @@ export default {
     return null
   },
 
+  // Pick zone at the end stop of the input belt (left hand) and the start of the output belt (right hand);
+  // the other hand cannot cross that far at belt height, so a package changes hands in the middle
+  reachTargets() {
+    return [
+      { side: 0, point: [BELT_X, 0.17, BELT_TOP + 0.08] },
+      { side: 1, point: [BELT_X, OUTPUT_START_Y - 0.08, BELT_TOP + 0.1] },
+    ]
+  },
+
   hud(sim) {
     const st = sim.taskState
     const ok = st.delivered.filter(r => r.outcome === 'correct').length

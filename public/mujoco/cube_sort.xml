@@ -1,6 +1,6 @@
 <!--
   Cube sorting: six 3D-printed PLA cubes, two of each colour, into the matching bins (a real bin model,
-  public/models/objects/bin/source.stl, converted by scripts/convert-object.py). Robot faces +x, +y is the robot's left, z is up.
+  assets/bin-source.stl, converted by scripts/convert-object.py). Robot faces +x, +y is the robot's left, z is up.
 -->
 <mujoco model="g1_cube_sort">
   <include file="g1_upper.xml"/>
@@ -66,7 +66,7 @@
       <geom name="bin_red_c10" type="mesh" mesh="bin_c10" class="touchable" group="3"/>
       <geom name="bin_red_c11" type="mesh" mesh="bin_c11" class="touchable" group="3"/>
     </body>
-    <body name="bin_green" pos="0.5 0.0 0.79">
+    <body name="bin_green" pos="0.45 0.0 0.79">
       <geom type="mesh" mesh="bin_visual" contype="0" conaffinity="0" density="0" material="green_bin"/>
       <geom name="bin_green_c0" type="mesh" mesh="bin_c0" class="touchable" group="3"/>
       <geom name="bin_green_c1" type="mesh" mesh="bin_c1" class="touchable" group="3"/>

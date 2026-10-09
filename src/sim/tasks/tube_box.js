@@ -35,6 +35,11 @@ export default {
     return Math.abs(x - bx) < BOX_INNER[0] && Math.abs(y - by) < BOX_INNER[1] && z < BOX_MAX_Z
   },
 
+  reachTargets(sim) {
+    const { tube, box } = sim.layout
+    return [{ side: 0, point: [tube[0], tube[1] + 0.012, tube[2] + 0.02] }, { side: 0, point: [box[0], box[1] + 0.06, 0.95] }, { side: 1, point: [box[0], box[1], 0.95] }]
+  },
+
   // Left hand carries the tube across to the box
   autopilot(sim, t) {
     const { tube, box } = sim.layout

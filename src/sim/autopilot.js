@@ -53,12 +53,12 @@ export function sampleKeys(keys, t) {
  */
 export function writeHandInput(input, offset, gripOffset, [gx, gy, gz, yaw, close]) {
   const c = Math.cos(yaw), s = Math.sin(yaw)
-  const [ox, oy] = gripOffset
+  const [ox, oy, oz] = gripOffset
   input[offset] = 1
   // palm = grip - R(yaw) * gripOffset; palm frame = world rotated by yaw about z
   input[offset + 1] = gx - (c * ox - s * oy)
   input[offset + 2] = gy - (s * ox + c * oy)
-  input[offset + 3] = gz
+  input[offset + 3] = gz - oz
   input[offset + 4] = Math.cos(yaw / 2); input[offset + 5] = 0; input[offset + 6] = 0; input[offset + 7] = Math.sin(yaw / 2)
   input[offset + 8] = 0
   for (let k = 1; k < 7; k++) input[offset + 8 + k] = close

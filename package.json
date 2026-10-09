@@ -18,7 +18,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint .",
     "sim-check": "node scripts/sim-check.mjs",
-    "check": "npm run lint && node scripts/sim-check.mjs tube_box n=1 && node scripts/sim-check.mjs conveyor n=1 && node scripts/sim-check.mjs cube_sort n=1"
+    "check": "npm run lint && npm test && node scripts/sim-check.mjs tube_box n=1 && node scripts/sim-check.mjs conveyor n=1 && node scripts/sim-check.mjs cube_sort n=1",
+    "test": "node scripts/unit-tests.mjs"
   },
   "dependencies": {
     "@mujoco/mujoco": "3.15.0",
@@ -36,6 +37,7 @@
     "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "globals": "^17.13.0",
+    "rollup-plugin-license": "^3.7.1",
     "vite": "^6.0.5"
   },
   "overrides": {

@@ -31,6 +31,8 @@ size = mesh.bounds[1] - mesh.bounds[0]
 
 out = Path(__file__).resolve().parent.parent / 'public' / 'models' / 'objects' / args.name
 out.mkdir(parents=True, exist_ok=True)
+for stale in out.glob('c*.stl'):  # a re-run with fewer pieces must not leave old ones behind
+    stale.unlink()
 mesh.export(out / 'visual.stl')
 
 coacd.set_log_level('error')
