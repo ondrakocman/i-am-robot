@@ -16,9 +16,11 @@ const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 
 // G1 colors: brushed-aluminium shell on the body and arms (Unitree's URDF "white" material), dark pelvis,
 // hip-pitch housings, feet, head and logo (URDF "dark"), and black Dex3 hands with rubber fingertip pads.
-const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x9c9fa3, roughness: 0.42, metalness: 0.7 })
-const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3 })
-const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0 })
+// Robot meshes are triangle soups with hard edges (Menagerie STL): flat shading keeps every edge crisp, while
+// averaged vertex normals smear the edges of the hand links into a melted look
+const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x9c9fa3, roughness: 0.42, metalness: 0.7, flatShading: true })
+const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3, flatShading: true })
+const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0, flatShading: true })
 const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
 const DARK_MESH = /^(head_link|logo_link)$|_hand_palm_link$/   // palm mesh hangs off the (silver) wrist body
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
@@ -353,7 +355,7 @@ function geomGeometry(g, meshes, cache, override) {
         geo.setAttribute('position', new THREE.BufferAttribute(vert, 3))
         // MuJoCo faces are Int32; WebGL index buffers must be unsigned
         geo.setIndex(new THREE.BufferAttribute(new Uint32Array(face.buffer, face.byteOffset, face.length), 1))
-        geo.computeVertexNormals() // smooth normals suit the robot meshes; scene meshes (bins) use flatShading
+        // no vertex normals: every mesh material is flat-shaded (face normals from screen-space derivatives)
         cache.set(g.mesh, geo)
       }
       return cache.get(g.mesh)
