@@ -14,7 +14,7 @@ const base = {
 }
 
 export default [
-  { ignores: ['dist/', 'node_modules/'] },
+  { ignores: ['dist/', 'node_modules/', 'scratch/'] },
   js.configs.recommended,
   // physics and task code: environment-agnostic (worker and Node); crypto/performance are in both
   {
@@ -26,7 +26,7 @@ export default [
   { files: ['src/sim/sim.worker.js'], languageOptions: { globals: { ...globals.worker, __MUJOCO_VERSION__: 'readonly' } } },
   // browser UI
   {
-    files: ['src/**/*.jsx', 'src/systems/**/*.js', 'src/constants/**/*.js', 'src/sim/episodeStore.js'],
+    files: ['src/**/*.jsx', 'src/components/**/*.js', 'src/systems/**/*.js', 'src/constants/**/*.js', 'src/sim/episodeStore.js'],
     ...base,
     languageOptions: { ...base.languageOptions, globals: { ...globals.browser, __GIT_SHA__: 'readonly' } },
     plugins: { 'react-hooks': reactHooks },

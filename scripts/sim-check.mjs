@@ -6,6 +6,8 @@
 //   3. an injected instability ends the episode as 'unstable', keeping the frames recorded before it
 //   4. every goal region the task declares is reachable by the hand that serves it
 //   5. resets over several seeds start from physically valid states (no object penetration)
+//   6. every geom the renderer draws has a material (collision-only geoms belong in group 3; an unmaterialed
+//      box drawn in default grey over a visual mesh is the classic mistake)
 //   node scripts/sim-check.mjs [task=<name>|all] [dt=0.002] [n=3] [seeds=25] [out=episodes.iamr]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
@@ -100,7 +102,7 @@ for (const task of tasks) {
     const got = []
     const probe = new TaskSim(mj, m, task, { seed: 11, autopilot: true, onEpisode: e => got.push(e) })
     holdReadyPose(probe)
-    probe.scheduleAtFrame(50, () => { probe.d.qvel[probe.objects[0].v] = NaN })
+    probe.scheduleAtFrame(50, () => { probe.d.qvel[0] = NaN }) // a robot DOF: a task spawn on the same frame would overwrite an object's
     while (!got.length && probe.steps < 10 / probe.dt) probe.step()
     const h = got[0]?.header
     if (!h) fail('NaN injection did not produce an episode')
@@ -114,7 +116,7 @@ for (const task of tasks) {
   if (task.reachTargets) {
     const probe = new TaskSim(mj, m, task, { seed: 1 })
     let unreachable = 0
-    for (const { side, point, tolerance = 0.02 } of task.reachTargets(probe)) {
+    for (const { side, point, tolerance = 0.01 } of task.reachTargets(probe)) {
       const arm = probe.arms[side]
       const ik = probe.ikData
       mj.mj_resetData(m, ik)
@@ -139,6 +141,14 @@ for (const task of tasks) {
   }
   console.log(`reset check: deepest object penetration over ${seeds} seeds ${(worst * 1000).toFixed(2)} mm`)
   if (worst > MAX_PENETRATION) fail(`resets start interpenetrating (${(worst * 1000).toFixed(1)} mm > ${MAX_PENETRATION * 1000} mm)`)
+
+  // 6. rendered geoms (group <= 2, as sim.worker.js describes the scene) must carry a material
+  const bare = []
+  for (let g = 0; g < m.ngeom; g++) {
+    if (m.geom_group[g] <= 2 && m.geom_matid[g] < 0) bare.push(mj.mj_id2name(m, mj.mjtObj.mjOBJ_GEOM.value, g) || `geom ${g} of ${mj.mj_id2name(m, mj.mjtObj.mjOBJ_BODY.value, m.geom_bodyid[g])}`)
+  }
+  if (bare.length) fail(`rendered geoms without a material (collision-only geoms need group="3"): ${bare.join(', ')}`)
+  else console.log('material check: every rendered geom has a material')
   m.delete()
 }
 

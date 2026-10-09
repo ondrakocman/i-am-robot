@@ -11,13 +11,15 @@
 
   <!-- Stiffer-than-default contacts on everything the hands touch (MuJoCo default timeconst is 0.02 s, which
        lets fingers sink a few mm into objects). 0.01 s keeps the required timeconst >= 2*timestep for every
-       timestep the app allows (up to 5 ms). priority=1 makes these win over the robot's default geoms. -->
+       timestep the app allows (up to 5 ms). priority=1 makes these win over the robot's default geoms; the
+       manipulated object is priority=2 so its (randomized) friction applies against table, box and hand alike
+       (on a priority tie MuJoCo takes the larger friction, which would hide the randomization). -->
   <default>
     <default class="touchable">
       <geom solref="0.01 1" priority="1"/>
     </default>
     <default class="tube_wall">
-      <geom type="box" size="0.001 0.0091 0.07" group="3" solref="0.01 1" priority="1" condim="6" friction="0.7 0.01 0.002"/>
+      <geom type="box" size="0.001 0.0091 0.07" group="3" solref="0.01 1" priority="2" condim="6" friction="0.7 0.01 0.002"/>
     </default>
   </default>
 

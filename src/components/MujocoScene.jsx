@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
+import { makeLabelTexture } from './shippingLabel.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { QuaternionSmoother } from '../systems/Smoothing.js'
@@ -248,7 +249,11 @@ function buildWorld({ scene, eye, task, palmOffset }) {
     const meshName = geom.mesh >= 0 ? scene.meshes[geom.mesh].name : ''
     const isRobot = scene.bodies[geom.body].robot
     let material
-    if (!isRobot) {
+    const override = task.geometry[geom.name]
+    if (override?.shippingLabel) {
+      // a printed label on the box face: paper-thin plane with a generated texture, drawn over the cardboard
+      material = new THREE.MeshStandardMaterial({ map: makeLabelTexture(override.shippingLabel.seed), roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 })
+    } else if (!isRobot) {
       const key = geom.material + '|' + geom.rgba.join(',') + (geom.mesh >= 0 ? '|flat' : '')
       if (!materialCache.has(key)) {
         const [r, g, b, a] = geom.rgba
@@ -265,7 +270,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
       const kind = PAD_BODY.test(bodyName) ? 2 : DARK_BODY.test(bodyName) || DARK_MESH.test(meshName) ? 1 : 0
       material = hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
     }
-    const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache, task.geometry[geom.name]), material)
+    const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache, override), material)
     mesh.position.fromArray(geom.pos)
     mesh.quaternion.set(geom.quat[1], geom.quat[2], geom.quat[3], geom.quat[0])
     // One shadow pass: only the forearms, hands and task objects cast; the scene receives
@@ -328,6 +333,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
 
 function geomGeometry(g, meshes, cache, override) {
   const [s0, s1, s2] = g.size
+  if (override?.shippingLabel) return new THREE.PlaneGeometry(2 * s0, 2 * s1) // faces the geom's +z
   if (override?.hollowCylinder && g.type === 'cylinder') {
     // a tube drawn with a real bore (the task's physics models the wall separately)
     const ri = s0 - override.hollowCylinder.wall

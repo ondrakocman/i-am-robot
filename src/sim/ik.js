@@ -45,8 +45,8 @@ function rotationError(target, cur, out, o) {
   out[o] = x * k; out[o + 1] = y * k; out[o + 2] = z * k
 }
 
-// Solves A x = b in place for a symmetric positive-definite 7x7 A (Cholesky)
-function cholSolve(A, b) {
+// Cholesky factorization in place of a symmetric positive-definite 7x7 A (lower triangle)
+function cholFactor(A) {
   for (let j = 0; j < N; j++) {
     let s = A[j * N + j]
     for (let k = 0; k < j; k++) s -= A[j * N + k] * A[j * N + k]
@@ -58,6 +58,10 @@ function cholSolve(A, b) {
       A[i * N + j] = t / d
     }
   }
+}
+
+// Solves L L^T x = b in place given the factor from cholFactor
+function cholSolve(A, b) {
   for (let i = 0; i < N; i++) {
     let t = b[i]
     for (let k = 0; k < i; k++) t -= A[i * N + k] * b[k]
@@ -90,17 +94,24 @@ export class ArmIK {
     this.J = new Float64Array(6 * N)
     this.A = new Float64Array(N * N)
     this.b = new Float64Array(N)
+    this.p = new Float64Array(N)
+    this.Jp = new Float64Array(6)
+    this.e2 = new Float64Array(N)
     this.qc = new Float64Array(4)
   }
 
   /**
    * Moves the arm joints in `d.qpos` toward the palm target. `d` is a scratch MjData that holds the commanded
    * configuration (not the physical state), so contact never drags the IK solution around.
+   *
+   * Each iteration takes a damped least-squares step on the palm error, plus a step toward the rest posture
+   * projected into the null space of the palm Jacobian: the posture resolves the arm's redundancy (where the
+   * elbow goes) without pulling the palm off its target, so a reachable target is reached exactly.
    */
   solve(mj, d, targetPos, targetQuat, {
-    iterations = 4, rotWeight = 0.35, damping = 1e-3, postureWeight = 3e-3, maxStep = 0.3,
+    iterations = 4, rotWeight = 0.35, damping = 1e-3, postureGain = 0.01, maxStep = 0.3,
   } = {}) {
-    const { m, e, J, A, b, qc, qadr, jnt } = this
+    const { m, e, J, A, b, p, Jp, e2, qc, qadr, jnt } = this
     for (let it = 0; it < iterations; it++) {
       mj.mj_kinematics(m, d)
       const sp = d.site_xpos, s3 = 3 * this.site
@@ -123,24 +134,41 @@ export class ArmIK {
         J[5 * N + k] = a2 * rotWeight
       }
 
-      // (J^T J + (damping + postureWeight) I) dq = J^T e + postureWeight (posture - q)
+      // A = J^T J + damping I, factored once and used for both solves below
       const qpos = d.qpos
       for (let i = 0; i < N; i++) {
-        let bi = 0
-        for (let r = 0; r < 6; r++) bi += J[r * N + i] * e[r]
-        b[i] = bi + postureWeight * (this.posture[i] - qpos[qadr[i]])
         for (let k = 0; k <= i; k++) {
           let s = 0
           for (let r = 0; r < 6; r++) s += J[r * N + i] * J[r * N + k]
           A[i * N + k] = s
           A[k * N + i] = s
         }
-        A[i * N + i] += damping + postureWeight
+        A[i * N + i] += damping
+        p[i] = postureGain * (this.posture[i] - qpos[qadr[i]])
+      }
+      cholFactor(A)
+      // task step: dq = A^-1 J^T e
+      for (let i = 0; i < N; i++) {
+        let bi = 0
+        for (let r = 0; r < 6; r++) bi += J[r * N + i] * e[r]
+        b[i] = bi
       }
       cholSolve(A, b)
+      // posture step in the null space: p - A^-1 J^T (J p), i.e. the part of p that does not move the palm
+      for (let r = 0; r < 6; r++) {
+        let s = 0
+        for (let k = 0; k < N; k++) s += J[r * N + k] * p[k]
+        Jp[r] = s
+      }
+      for (let i = 0; i < N; i++) {
+        let s = 0
+        for (let r = 0; r < 6; r++) s += J[r * N + i] * Jp[r]
+        e2[i] = s
+      }
+      cholSolve(A, e2)
 
       for (let i = 0; i < N; i++) {
-        const dq = Math.max(-maxStep, Math.min(maxStep, b[i]))
+        const dq = Math.max(-maxStep, Math.min(maxStep, b[i] + p[i] - e2[i]))
         qpos[qadr[i]] = Math.max(this.lo[i], Math.min(this.hi[i], qpos[qadr[i]] + dq))
       }
     }

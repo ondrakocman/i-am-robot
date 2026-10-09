@@ -26,16 +26,17 @@ Pick the task on the landing page (or `?task=`):
 
 - **Tube into box** (`tube_box`), modeled on Isaac Lab's `PickPlace-FixedBaseUpperBodyIK-G1`: a hollow steel tube
   stands on the robot's left, the box sits on its right.
-- **Conveyor** (`conveyor`), in the spirit of the humanoid logistics demos: packages arrive on the left roller belt
-  in a random orientation; turn each one shipping-tag up and set it on the right belt, which carries it away.
-  Five packages per episode, three sizes, randomized mass, friction and belt speed; each package is scored
-  `correct` / `wrong_face` / `dropped`.
+- **Conveyor** (`conveyor`), after Figure's 24-hour logistics demo: packages slide down a chute on the robot's
+  left onto a flat work plate in front of it, in a random orientation; turn each one shipping-label up and set it
+  on the roller belt on the right, which carries it away. Five packages per episode, three sizes, printed labels
+  (address, barcode, QR), randomized mass, friction and belt speed; each package is scored `correct` /
+  `wrong_face` / `dropped`.
 - **Cube sorting** (`cube_sort`): six printed PLA cubes, two of each colour, into the matching bins (the bin is a
   real model, converted with `scripts/convert-object.py`).
 
 Static tasks succeed when the goal holds with every object at rest and both hands off them for 0.5 s; the
 conveyor task ends once every package has been scored (delivered or dropped), `success` only if all were
-tag-up. Episodes also end on a drop, a timeout, 5 s without tracked hands (`lost_tracking`), leaving VR
+label-up. Episodes also end on a drop, a timeout, 5 s without tracked hands (`lost_tracking`), leaving VR
 (`aborted`), a headset recenter (`recentered`), or a MuJoCo instability (`unstable`, keeping the frames recorded
 before it). Then the episode is saved and the scene re-randomizes (object placement, mass, friction, belt
 speed), all logged.
@@ -108,8 +109,9 @@ data, so get consent before sharing datasets recorded by others.
 - `zustand` is a dependency only because the XR emulator's dev UI (`@iwer/devui`, localhost only) imports it
   without declaring it; the app itself does not use it
 - `scripts/build-g1-mjcf.py`, `scripts/build-conveyor-scene.py`, `scripts/decimate-meshes.py`,
-  `scripts/convert-object.py` regenerate the generated assets (`pip install -r requirements.txt`, Python ≥ 3.11;
-  decimation reproduces exactly with the pinned versions, CoACD's hulls can differ slightly between machines, which
-  changes the asset hashes in new episodes); `assets/` holds source models that are not served
+  `scripts/convert-object.py` regenerate the generated assets (`pip install -r requirements-tools.txt`, Python ≥
+  3.11; decimation reproduces exactly with the pinned versions); `assets/` holds source models that are not served.
+  The bin's colliders are hand-written boxes at the model's true wall thickness (`public/mujoco/cube_sort.xml`);
+  `convert-object.py --hulls` also writes CoACD convex pieces for objects that need them
 
 License: MIT (see `LICENSE`); third-party assets in `THIRD_PARTY.md`.

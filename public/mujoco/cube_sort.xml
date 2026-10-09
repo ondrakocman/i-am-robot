@@ -12,6 +12,11 @@
     <default class="touchable">
       <geom solref="0.01 1" priority="1"/>
     </default>
+    <!-- the manipulated objects: priority 2 so their (randomized) friction applies against table, bins and
+         hands alike (on a priority tie MuJoCo takes the larger friction, which would hide the randomization) -->
+    <default class="object">
+      <geom solref="0.01 1" priority="2"/>
+    </default>
   </default>
 
   <asset>
@@ -45,59 +50,59 @@
       <!-- collision: the bin's walls and floor as solid boxes with the measured 2 mm thickness (outer
            220 x 180 x 80 mm, interior 216 x 176 mm), exactly what the operator sees; boxes have no seams
            for a fingertip to slip through, unlike a convex decomposition of the perforated mesh -->
-      <geom name="bin_red_floor" class="touchable" type="box" size="0.11 0.09 0.001" pos="0 0 0.001"/>
-      <geom name="bin_red_wall_x0" class="touchable" type="box" size="0.001 0.09 0.039" pos="0.109 0 0.041"/>
-      <geom name="bin_red_wall_x1" class="touchable" type="box" size="0.001 0.09 0.039" pos="-0.109 0 0.041"/>
-      <geom name="bin_red_wall_y0" class="touchable" type="box" size="0.11 0.001 0.039" pos="0 0.089 0.041"/>
-      <geom name="bin_red_wall_y1" class="touchable" type="box" size="0.11 0.001 0.039" pos="0 -0.089 0.041"/>
+      <geom name="bin_red_floor" class="touchable" type="box" group="3" size="0.11 0.09 0.001" pos="0 0 0.001"/>
+      <geom name="bin_red_wall_x0" class="touchable" type="box" group="3" size="0.001 0.09 0.039" pos="0.109 0 0.041"/>
+      <geom name="bin_red_wall_x1" class="touchable" type="box" group="3" size="0.001 0.09 0.039" pos="-0.109 0 0.041"/>
+      <geom name="bin_red_wall_y0" class="touchable" type="box" group="3" size="0.11 0.001 0.039" pos="0 0.089 0.041"/>
+      <geom name="bin_red_wall_y1" class="touchable" type="box" group="3" size="0.11 0.001 0.039" pos="0 -0.089 0.041"/>
     </body>
     <body name="bin_green" pos="0.45 0.0 0.79">
       <geom type="mesh" mesh="bin_visual" contype="0" conaffinity="0" density="0" material="green_bin"/>
       <!-- collision: the bin's walls and floor as solid boxes with the measured 2 mm thickness (outer
            220 x 180 x 80 mm, interior 216 x 176 mm), exactly what the operator sees; boxes have no seams
            for a fingertip to slip through, unlike a convex decomposition of the perforated mesh -->
-      <geom name="bin_green_floor" class="touchable" type="box" size="0.11 0.09 0.001" pos="0 0 0.001"/>
-      <geom name="bin_green_wall_x0" class="touchable" type="box" size="0.001 0.09 0.039" pos="0.109 0 0.041"/>
-      <geom name="bin_green_wall_x1" class="touchable" type="box" size="0.001 0.09 0.039" pos="-0.109 0 0.041"/>
-      <geom name="bin_green_wall_y0" class="touchable" type="box" size="0.11 0.001 0.039" pos="0 0.089 0.041"/>
-      <geom name="bin_green_wall_y1" class="touchable" type="box" size="0.11 0.001 0.039" pos="0 -0.089 0.041"/>
+      <geom name="bin_green_floor" class="touchable" type="box" group="3" size="0.11 0.09 0.001" pos="0 0 0.001"/>
+      <geom name="bin_green_wall_x0" class="touchable" type="box" group="3" size="0.001 0.09 0.039" pos="0.109 0 0.041"/>
+      <geom name="bin_green_wall_x1" class="touchable" type="box" group="3" size="0.001 0.09 0.039" pos="-0.109 0 0.041"/>
+      <geom name="bin_green_wall_y0" class="touchable" type="box" group="3" size="0.11 0.001 0.039" pos="0 0.089 0.041"/>
+      <geom name="bin_green_wall_y1" class="touchable" type="box" group="3" size="0.11 0.001 0.039" pos="0 -0.089 0.041"/>
     </body>
     <body name="bin_blue" pos="0.32 -0.31 0.79">
       <geom type="mesh" mesh="bin_visual" contype="0" conaffinity="0" density="0" material="blue_bin"/>
       <!-- collision: the bin's walls and floor as solid boxes with the measured 2 mm thickness (outer
            220 x 180 x 80 mm, interior 216 x 176 mm), exactly what the operator sees; boxes have no seams
            for a fingertip to slip through, unlike a convex decomposition of the perforated mesh -->
-      <geom name="bin_blue_floor" class="touchable" type="box" size="0.11 0.09 0.001" pos="0 0 0.001"/>
-      <geom name="bin_blue_wall_x0" class="touchable" type="box" size="0.001 0.09 0.039" pos="0.109 0 0.041"/>
-      <geom name="bin_blue_wall_x1" class="touchable" type="box" size="0.001 0.09 0.039" pos="-0.109 0 0.041"/>
-      <geom name="bin_blue_wall_y0" class="touchable" type="box" size="0.11 0.001 0.039" pos="0 0.089 0.041"/>
-      <geom name="bin_blue_wall_y1" class="touchable" type="box" size="0.11 0.001 0.039" pos="0 -0.089 0.041"/>
+      <geom name="bin_blue_floor" class="touchable" type="box" group="3" size="0.11 0.09 0.001" pos="0 0 0.001"/>
+      <geom name="bin_blue_wall_x0" class="touchable" type="box" group="3" size="0.001 0.09 0.039" pos="0.109 0 0.041"/>
+      <geom name="bin_blue_wall_x1" class="touchable" type="box" group="3" size="0.001 0.09 0.039" pos="-0.109 0 0.041"/>
+      <geom name="bin_blue_wall_y0" class="touchable" type="box" group="3" size="0.11 0.001 0.039" pos="0 0.089 0.041"/>
+      <geom name="bin_blue_wall_y1" class="touchable" type="box" group="3" size="0.11 0.001 0.039" pos="0 -0.089 0.041"/>
     </body>
 
     <!-- Cubes: 5 cm printed PLA, ~60 g with infill; positions are set at reset -->
     <body name="cube0" pos="0.26 0.05 0.816">
       <freejoint name="cube0_free"/>
-      <geom name="cube0" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="red"/>
+      <geom name="cube0" class="object" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="red"/>
     </body>
     <body name="cube1" pos="0.33 0.05 0.816">
       <freejoint name="cube1_free"/>
-      <geom name="cube1" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="red"/>
+      <geom name="cube1" class="object" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="red"/>
     </body>
     <body name="cube2" pos="0.40 0.05 0.816">
       <freejoint name="cube2_free"/>
-      <geom name="cube2" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="green"/>
+      <geom name="cube2" class="object" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="green"/>
     </body>
     <body name="cube3" pos="0.26 -0.05 0.816">
       <freejoint name="cube3_free"/>
-      <geom name="cube3" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="green"/>
+      <geom name="cube3" class="object" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="green"/>
     </body>
     <body name="cube4" pos="0.33 -0.05 0.816">
       <freejoint name="cube4_free"/>
-      <geom name="cube4" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="blue"/>
+      <geom name="cube4" class="object" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="blue"/>
     </body>
     <body name="cube5" pos="0.40 -0.05 0.816">
       <freejoint name="cube5_free"/>
-      <geom name="cube5" class="touchable" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="blue"/>
+      <geom name="cube5" class="object" type="box" size="0.025 0.025 0.025" mass="0.06" condim="4" friction="0.5 0.005 0.0002" material="blue"/>
     </body>
   </worldbody>
 </mujoco>
