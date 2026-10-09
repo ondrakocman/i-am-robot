@@ -25,10 +25,14 @@ jobs:
         with:
           python-version: '3.12'
       - run: npm ci
-      - run: pip install numpy==2.4.2
+      - run: pip install -r requirements.txt
       - run: npm run lint
       - run: npm test
+      # generated scene files must match their generator
+      - run: python3 -I scripts/build-conveyor-scene.py && git diff --exit-code public/mujoco/conveyor.xml src/sim/tasks/conveyor.layout.js
       - run: node scripts/sim-check.mjs all n=2 out=/tmp/all.iamr
+      # the loosest and the tightest supported timesteps
+      - run: node scripts/sim-check.mjs all n=1 dt=0.005 && node scripts/sim-check.mjs all n=1 dt=0.001
       # the same file path a headset download takes: decode in Node and in Python, replay, dump poses
       - run: node scripts/replay.mjs /tmp/all.iamr /tmp/poses.ndjson
       - run: python3 scripts/load_episodes.py /tmp/all.iamr

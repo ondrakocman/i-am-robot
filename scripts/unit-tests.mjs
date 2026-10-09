@@ -101,7 +101,8 @@ test('episode store: an upgrade blocked by an older tab fails over to memory ins
   assert.ok(performance.now() - t0 < store.BLOCKED_TIMEOUT_MS + 1000, 'gave up within the timeout')
   assert.ok(seen.some(s => s.blocked && s.pending === 1), 'reported the blocked upgrade while the write was pending')
   assert.deepEqual([seen.at(-1).pending, seen.at(-1).unsaved], [0, 1])
-  assert.equal((await store.exportEpisodes()).size, 5)
+  const out = await store.exportEpisodes()
+  assert.deepEqual([out.blob.size, out.partial], [5, true])
 })
 
 test('episode store: a failing database keeps episodes in memory and still exports them', async () => {
@@ -113,8 +114,8 @@ test('episode store: a failing database keeps episodes in memory and still expor
   store.onEpisodesChanged(s => seen.push({ ...s }))
   await assert.rejects(store.saveEpisode({ success: true, task: 't' }, new Blob([new Uint8Array([1, 2, 3])])))
   assert.equal(seen.at(-1).unsaved, 1)
-  const blob = await store.exportEpisodes()
-  assert.equal(blob.size, 3)
+  const { blob, partial } = await store.exportEpisodes()
+  assert.deepEqual([blob.size, partial], [3, true])
   await store.clearEpisodes()
   assert.equal(seen.at(-1).unsaved, 0)
   // and a working database counts, indexes and exports normally
@@ -125,5 +126,6 @@ test('episode store: a failing database keeps episodes in memory and still expor
   const s = await new Promise(resolve => fresh.onEpisodesChanged(resolve))
   assert.equal(s.total, 2)
   assert.equal(s.success, 1)
-  assert.equal((await fresh.exportEpisodes()).size, 6)
+  const full = await fresh.exportEpisodes()
+  assert.deepEqual([full.blob.size, full.partial, full.count], [6, false, 2])
 })

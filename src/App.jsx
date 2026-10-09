@@ -4,15 +4,17 @@ import { createXRStore, XR } from '@react-three/xr'
 import * as THREE from 'three'
 import { MujocoScene } from './components/MujocoScene.jsx'
 import { onEpisodesChanged, episodeStats, exportEpisodes, clearEpisodes } from './sim/episodeStore.js'
-import { TASKS, DEFAULT_TASK } from './sim/tasks/index.js'
+import { TASKS, DEFAULT_TASK, hasTask } from './sim/tasks/index.js'
 
+const REQUESTED_HZ = Number(new URLSearchParams(location.search).get('hz')) || 90
 const xrStore = createXRStore({
   hand: { model: false },
   controller: false,
   // Desktop emulator (only injected on localhost): start in hand-tracking mode, the app ignores controllers
   emulate: { primaryInputMode: 'hand' },
   foveation: 1,
-  frameRate: 'high',
+  // the display rate: 90 Hz by default (120 Hz halves the frame budget for the 630k-triangle robot); ?hz=72|90|120
+  frameRate: rates => rates.includes(REQUESTED_HZ) ? REQUESTED_HZ : rates.includes(90) ? 90 : rates.at(-1),
 })
 
 let leaving = false // the operator confirmed a task switch; do not prompt again on the reload
@@ -59,16 +61,19 @@ export default function App() {
       return option
     }))
     const requested = params.get('task')
-    select.value = TASKS[requested] ? requested : DEFAULT_TASK
-    if (requested && !TASKS[requested]) {
-      const status = document.getElementById('sim-status')
-      if (status) status.textContent = `Unknown task "${requested}"; choose one from the list`
+    select.value = hasTask(requested) ? requested : DEFAULT_TASK
+    if (requested && !hasTask(requested)) {
+      // next to the selector, where the physics status line cannot overwrite it
+      const note = document.createElement('span')
+      note.textContent = ` unknown task "${requested}", showing ${select.value}`
+      note.style.color = '#ffb35d'
+      select.insertAdjacentElement('afterend', note)
     }
     const onChange = () => {
       // switching tasks reloads the page, which would drop an episode still being written or kept only in memory
       const { pending, unsaved } = episodeStats()
       if (pending + unsaved > 0 && !confirm('An episode is still being saved or has not been downloaded yet. Switching tasks reloads the page and loses it. Switch anyway?')) {
-        select.value = TASKS[requested] ? requested : DEFAULT_TASK
+        select.value = hasTask(requested) ? requested : DEFAULT_TASK
         return
       }
       leaving = true
@@ -100,12 +105,14 @@ export default function App() {
     window.addEventListener('beforeunload', onUnload)
     const onDownload = async () => {
       try {
-        const url = URL.createObjectURL(await exportEpisodes())
+        const { blob, partial, count } = await exportEpisodes()
+        const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
         a.download = `iamr_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
         a.click()
         setTimeout(() => URL.revokeObjectURL(url), 10000)
+        if (partial) count.textContent = `Downloaded ${count} unsaved episode(s) only: the stored ones are locked by another I Am Robot tab. Close it and download again.`
       } catch (err) {
         count.textContent = `Export failed: ${err.message}`
       }

@@ -3,6 +3,7 @@ import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { makeLabelTexture } from './shippingLabel.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
+import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { QuaternionSmoother } from '../systems/Smoothing.js'
 import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
@@ -73,6 +74,7 @@ export function MujocoScene() {
   const lastState = useRef({ at: 0, info: null })
 
   useEffect(() => {
+    const baseUrl = new URL(import.meta.env.BASE_URL, location.href).href
     const worker = new Worker(new URL('../sim/sim.worker.js', import.meta.url), { type: 'module' })
     workerRef.current = worker
     setStatusText('Loading physics…')
@@ -89,8 +91,13 @@ export function MujocoScene() {
         latest.current = data
         lastState.current = { at: performance.now(), info: data.info }
       } else if (data.type === 'ready') {
-        setWorld(buildWorld(data))
-        setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`)
+        const world = buildWorld(data)
+        setWorld(world)
+        setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step · loading robot meshes…`)
+        // the robot's visual meshes are not in the physics model (see scripts/build-g1-mjcf.py): load them here
+        attachRobotVisuals(world, data.scene, baseUrl)
+          .then(() => setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`))
+          .catch(err => fail(`robot meshes: ${err.message}`))
       } else if (data.type === 'episode') {
         saveEpisode(data.header, data.data)
           .catch(err => console.error('[episodes] save failed, kept in memory for download', err))
@@ -101,7 +108,7 @@ export function MujocoScene() {
     worker.onerror = e => fail(e.message ?? String(e))
     worker.postMessage({
       type: 'init',
-      baseUrl: new URL(import.meta.env.BASE_URL, location.href).href,
+      baseUrl,
       timestep: Number(params.get('dt')) || undefined,
       autopilot: params.has('autopilot'),
       session: SESSION_ID,
@@ -158,8 +165,11 @@ export function MujocoScene() {
       // Leaving VR, or taking the headset off (the session goes hidden), ends the running episode; the
       // worker's input watchdog also stops the hands
       const abort = outcome => workerRef.current?.postMessage({ type: 'abort', outcome })
-      // the display rate the headset actually granted goes into every episode header
-      workerRef.current?.postMessage({ type: 'meta', meta: { xr_frame_rate: session.frameRate ?? null } })
+      // the display rate the headset actually granted goes into every episode header; the store may still be
+      // switching it when the first frame arrives, so follow later changes too
+      const sendRate = () => workerRef.current?.postMessage({ type: 'meta', meta: { xr_frame_rate: session.frameRate ?? null } })
+      sendRate()
+      session.addEventListener('frameratechange', sendRate)
       session.addEventListener('end', () => abort('aborted'), { once: true })
       session.addEventListener('visibilitychange', () => { if (session.visibilityState === 'hidden') abort('aborted') })
     }
@@ -267,9 +277,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
       }
       material = materialCache.get(key)
     } else {
-      const hand = handOfBodyName(bodyName)
-      const kind = PAD_BODY.test(bodyName) ? 2 : DARK_BODY.test(bodyName) || DARK_MESH.test(meshName) ? 1 : 0
-      material = hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
+      material = robotMaterial(bodyName, meshName, handMaterials)
     }
     const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache, override), material)
     mesh.position.fromArray(geom.pos)
@@ -379,6 +387,37 @@ function applyInfo(world, info, saves) {
   }
   world.reset.setProgress(info.resetProgress)
   world.hud.draw(info, saves)
+}
+
+// ── Robot visual meshes: full-resolution STL files the physics model does not carry ─────────────────
+
+function robotMaterial(bodyName, meshName, handMaterials) {
+  const hand = handOfBodyName(bodyName)
+  const kind = PAD_BODY.test(bodyName) ? 2 : DARK_BODY.test(bodyName) || DARK_MESH.test(meshName) ? 1 : 0
+  return hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
+}
+
+// Loads public/models/meshes/visual.json (which STL hangs off which body, at what offset) and hangs the
+// meshes under the world's body groups as they arrive. STL files carry per-facet normals, so edges stay crisp.
+async function attachRobotVisuals(world, scene, baseUrl) {
+  const res = await fetch(`${baseUrl}models/meshes/visual.json`)
+  if (!res.ok) throw new Error(`visual.json: ${res.status}`)
+  const { geoms } = await res.json()
+  const loader = new STLLoader()
+  const geometries = new Map()
+  const bodyIndex = new Map(scene.bodies.map((b, i) => [b.name, i]))
+  await Promise.all(geoms.map(async g => {
+    if (!geometries.has(g.file)) geometries.set(g.file, loader.loadAsync(`${baseUrl}models/meshes/${g.file}`))
+    const geometry = await geometries.get(g.file)
+    const body = bodyIndex.get(g.body)
+    if (body === undefined) throw new Error(`visual.json names unknown body ${g.body}`)
+    const mesh = new THREE.Mesh(geometry, robotMaterial(g.body, g.mesh, world.handMaterials))
+    mesh.position.fromArray(g.pos)
+    mesh.quaternion.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0])
+    mesh.castShadow = SHADOW_CASTER_BODY.test(g.body) // one shadow pass: forearms and hands cast, the robot never receives
+    if (g.mesh === 'head_link') { mesh.visible = world.headMeshes[0]?.visible ?? true; world.headMeshes.push(mesh) }
+    world.bodies[body].add(mesh)
+  }))
 }
 
 // ── Ghost hand: the operator's real hand, shown only when the robot hand can't follow it ────────────

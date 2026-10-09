@@ -67,7 +67,7 @@ function run(mode, fn) {
 
 const listeners = new Set()
 const pending = new Set() // writes in flight, each { data, done }
-const unsaved = []        // Blobs the database refused, in recording order
+const unsaved = []        // { header, data } the database refused, in recording order
 // available: null until the first open settles; pending/unsaved: episodes that exist only in this page's memory
 let stats = { total: 0, success: 0, pending: 0, unsaved: 0, blocked: false, available: null }
 const notify = () => listeners.forEach(fn => fn(stats))
@@ -110,9 +110,11 @@ export function saveEpisode(header, data) {
   entry.done = (async () => {
     try {
       await run('readwrite', s => s.add({ header, success: header.success ? 1 : 0, task: header.task, data }))
-      stats = { ...stats, total: stats.total + 1, success: stats.success + (header.success ? 1 : 0), available: true }
+      // counts are only incremental once the database has been counted (its first open may have failed)
+      if (stats.available === true) stats = { ...stats, total: stats.total + 1, success: stats.success + (header.success ? 1 : 0) }
+      else await refreshStats()
     } catch (err) {
-      unsaved.push(data)
+      unsaved.push({ header, data })
       stats = { ...stats, unsaved: unsaved.length }
       throw err
     } finally {
@@ -128,21 +130,26 @@ export function saveEpisode(header, data) {
 }
 
 /**
- * One Blob of every episode in recording order: the stored ones, then any the database refused. Writes still
- * in flight are waited for first, so each episode is in exactly one of the two groups.
+ * Every episode as one Blob, in recording order (stored ones and any the database refused, merged by start
+ * time). Writes still in flight are waited for first, so each episode is in exactly one of the two groups.
+ * `partial` is true when the database could not be read, so the file holds the in-memory episodes only.
  */
 export async function exportEpisodes() {
   await Promise.allSettled([...pending].map(p => p.done))
   let stored = []
+  let partial = false
   try {
     stored = await run('readonly', s => s.getAll())
   } catch (err) {
     console.error('[episodes] storage unavailable, exporting the in-memory episodes only', err)
+    partial = true
   }
-  return new Blob([...stored.map(e => e.data), ...unsaved], { type: 'application/octet-stream' })
+  const all = [...stored, ...unsaved].sort((a, b) => (a.header?.started_at ?? '').localeCompare(b.header?.started_at ?? ''))
+  return { blob: new Blob(all.map(e => e.data), { type: 'application/octet-stream' }), partial, count: all.length }
 }
 
 export async function clearEpisodes() {
+  await Promise.allSettled([...pending].map(p => p.done)) // a write in flight must not survive Clear
   unsaved.length = 0
   stats = { ...stats, unsaved: 0 }
   try { await run('readwrite', s => s.clear()) } catch (err) { console.error('[episodes] clear failed', err) }

@@ -3,7 +3,7 @@
 // output belt (robot's right), which carries it away. One episode = a fixed number of packages.
 import { LAYOUT } from './conveyor.layout.js'
 
-const { pool: POOL, beltX: BELT_X, beltTop: BELT_TOP, rollerRadius: ROLLER_R, spawn: SPAWN, plateY: PLATE_Y, exitY: EXIT_Y, outputStartY: OUTPUT_START_Y, sizes: SIZES } = LAYOUT
+const { pool: POOL, beltX: BELT_X, beltTop: BELT_TOP, rollerRadius: ROLLER_R, spawn: SPAWN, chuteNormal: CHUTE_N, plateY: PLATE_Y, exitY: EXIT_Y, outputStartY: OUTPUT_START_Y, sizes: SIZES } = LAYOUT
 const PACKAGES_PER_EPISODE = 5
 const SPAWN_INTERVAL = [5, 9]         // s between packages, once the top of the chute is clear
 const SPAWN_CLEARANCE = 0.25          // m: no other package this close to the spawn point
@@ -27,6 +27,29 @@ function mulQuat([aw, ax, ay, az], [bw, bx, by, bz]) {
     aw * by - ax * bz + ay * bw + az * bx,
     aw * bz + ax * by - ay * bx + az * bw,
   ]
+}
+
+// Rotates v by the unit quaternion q (w, x, y, z)
+function rotate([w, x, y, z], [vx, vy, vz]) {
+  const tx = 2 * (y * vz - z * vy), ty = 2 * (z * vx - x * vz), tz = 2 * (x * vy - y * vx)
+  return [vx + w * tx + (y * tz - z * ty), vy + w * ty + (z * tx - x * tz), vz + w * tz + (x * ty - y * tx)]
+}
+
+/**
+ * Where a package with this plan (pool body, label face, yaw) appears on the chute: resting on the spawn
+ * point of the chute surface, lifted along the surface normal by the rotated box's extent in that direction
+ * plus a small gap, so no face starts inside the sheet whatever the orientation.
+ */
+function spawnPose(plan) {
+  const half = SIZES[Math.floor(plan.body / 2)]
+  const quat = mulQuat([Math.cos(plan.yaw / 2), 0, 0, Math.sin(plan.yaw / 2)], FACE_UP[plan.face])
+  let extent = 0
+  for (let i = 0; i < 3; i++) {
+    const axis = rotate(quat, [i === 0 ? 1 : 0, i === 1 ? 1 : 0, i === 2 ? 1 : 0])
+    extent += Math.abs(axis[0] * CHUTE_N[0] + axis[1] * CHUTE_N[1] + axis[2] * CHUTE_N[2]) * half[i]
+  }
+  const lift = extent + 0.004
+  return { pos: [SPAWN[0] + CHUTE_N[0] * lift, SPAWN[1] + CHUTE_N[1] * lift, SPAWN[2] + CHUTE_N[2] * lift], quat }
 }
 
 const round = (x, p = 3) => Number(x.toFixed(p))
@@ -86,8 +109,8 @@ export default {
         return Math.hypot(x - SPAWN[0], y - SPAWN[1], z - SPAWN[2]) < SPAWN_CLEARANCE
       })
       if (clear) {
-        const quat = mulQuat([Math.cos(plan.yaw / 2), 0, 0, Math.sin(plan.yaw / 2)], FACE_UP[plan.face])
-        sim.teleportObject(plan.body, SPAWN, quat)
+        const { pos, quat } = spawnPose(plan)
+        sim.teleportObject(plan.body, pos, quat)
         st.active.push({ body: plan.body, index: st.spawned })
         st.spawned++
         st.nextSpawnAt = t + plan.after
@@ -131,6 +154,32 @@ export default {
   result(sim) {
     const st = sim.taskState
     return { packages: st.order.length, delivered: st.delivered, correct: st.delivered.filter(r => r.outcome === 'correct').length }
+  },
+
+  // Headless check: every spawn pose the plan can draw (each pool body, face and yaw extreme) must be a valid,
+  // non-penetrating state
+  spawnPoses() {
+    const poses = []
+    for (let body = 0; body < POOL; body++) {
+      for (let face = 0; face < 6; face++) {
+        for (const yaw of [-0.5, 0, 0.5]) poses.push({ body, ...spawnPose({ body, face, yaw }) })
+      }
+    }
+    return poses
+  },
+
+  // Headless check of the scoring: packages label-down on the output belt must end the episode as 'partial'
+  // with every package scored wrong_face
+  failureCase(sim) {
+    const st = sim.taskState
+    st.active = []
+    st.order.forEach((plan, n) => {
+      const half = SIZES[Math.floor(plan.body / 2)]
+      sim.teleportObject(plan.body, [BELT_X, OUTPUT_START_Y - 0.08 - 0.14 * n, BELT_TOP + half[2] + 0.002], FACE_UP[1])
+      st.active.push({ body: plan.body, index: n })
+    })
+    st.spawned = st.order.length
+    return { outcome: 'partial', result: r => r.delivered.every(d => d.outcome === 'wrong_face') }
   },
 
   // Headless check: packages already turned label-up on the output belt; the belt must carry them off and score them

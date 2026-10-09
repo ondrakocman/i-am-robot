@@ -26,7 +26,7 @@ CHUTE_RISE = 0.22              # height gained over the run (~20 degrees)
 CHUTE_HALF_W = 0.15            # half width (x)
 CHUTE_THICK = 0.015
 CHUTE_X = 0.32                 # chute centre line (where packages come to rest in x), within the left hand's reach
-SPAWN_ABOVE = 0.05             # packages appear this far above the chute surface, just below its top end
+SPAWN_BACK = 0.08              # packages appear this far (horizontally) below the top end of the chute
 # output belt
 R = 0.014                      # roller radius
 PITCH = 0.03
@@ -123,9 +123,11 @@ for k, (hx, hy, hz) in enumerate(SIZES):
       <geom name="label{n}" class="label" size="{f(min(hx * 0.85, 0.05))} {f(min(hy * 0.85, 0.035))} 0.0002" pos="0 0 {f(hz + 0.0002)}" material="label"/>
     </body>''')
 
-# spawn point: just below the top of the chute, above its surface
-spawn_y = CHUTE_FOOT_Y + CHUTE_LEN_Y - 0.08
-spawn_z = TOP + CHUTE_RISE * (spawn_y - CHUTE_FOOT_Y) / CHUTE_LEN_Y + SPAWN_ABOVE
+# spawn point on the chute surface, just below its top end; the task lifts each package along the surface
+# normal by its own rotated extent so no face starts inside the sheet
+spawn_y = CHUTE_FOOT_Y + CHUTE_LEN_Y - SPAWN_BACK
+spawn_z = TOP + CHUTE_RISE * (spawn_y - CHUTE_FOOT_Y) / CHUTE_LEN_Y
+chute_normal = [0, round(-math.sin(ANGLE), 6), round(math.cos(ANGLE), 6)]
 
 xml = f'''<!--
   Conveyor package handling after Figure's 24-hour logistics demo: packages slide down a chute on the robot's
@@ -189,7 +191,7 @@ out = repo / 'public' / 'mujoco' / 'conveyor.xml'
 out.write_text(xml)
 layout = {
     'pool': 2 * len(SIZES), 'sizes': SIZES, 'beltX': BELT_X, 'beltTop': TOP, 'rollerRadius': R,
-    'spawn': [CHUTE_X, round(spawn_y, 4), round(spawn_z, 4)],
+    'spawn': [CHUTE_X, round(spawn_y, 4), round(spawn_z, 4)], 'chuteNormal': chute_normal,
     'plateX': list(PLATE_X), 'plateY': list(PLATE_Y),
     'exitY': round(EXIT_Y, 4), 'outputStartY': round(OUT_Y0 + 0.02, 4),
 }

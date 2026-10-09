@@ -42,6 +42,10 @@ export async function loadScene(mj, readFile, { scene, timestep } = {}) {
   mj.FS.writeFile(`${VFS_ROOT}/g1_upper.xml`, robot)
   mj.FS.writeFile(`${VFS_ROOT}/scene.xml`, xml)
   const model = mj.MjModel.from_xml_path(`${VFS_ROOT}/scene.xml`)
+  // the compiled model holds its own copy of everything: free the in-memory file copies (tens of MB of meshes)
+  for (const { dst } of files) mj.FS.unlink(`${VFS_ROOT}/meshes/${dst}`)
+  mj.FS.unlink(`${VFS_ROOT}/g1_upper.xml`)
+  mj.FS.unlink(`${VFS_ROOT}/scene.xml`)
   if (timestep) model.opt.timestep = timestep // m.opt is a reference view: assignment writes through
   return { model, assets }
 }

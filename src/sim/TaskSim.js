@@ -54,9 +54,12 @@ const READY = {
   shoulder_pitch: 0.3, shoulder_roll: 0.3, shoulder_yaw: 0, elbow: -0.8,
   wrist_roll: 0, wrist_pitch: 0, wrist_yaw: 0,
 }
-// IK rest posture, approached in the null space of the palm task (so it never moves the palm): the ready
-// pose itself, elbow down and bent
-const POSTURE = READY
+// IK rest posture, approached in the null space of the palm task (so it never moves the palm): elbow down
+// and slightly out
+const POSTURE = {
+  shoulder_pitch: 0, shoulder_roll: 0.3, shoulder_yaw: 0, elbow: 0,
+  wrist_roll: 0, wrist_pitch: 0, wrist_yaw: 0,
+}
 const MIRRORED = new Set(['shoulder_roll', 'shoulder_yaw', 'wrist_roll', 'wrist_yaw'])
 // Joint speed limits applied to the commanded targets (rad/s)
 const ARM_SPEED = [3, 3, 3, 3, 5, 5, 5]

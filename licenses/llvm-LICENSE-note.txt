@@ -1,0 +1,2 @@
+libc++ and compiler-rt (LLVM project), as bundled by Emscripten and statically linked into mujoco.wasm, are
+licensed under the Apache License 2.0 with LLVM Exceptions: https://llvm.org/LICENSE.txt

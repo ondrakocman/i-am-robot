@@ -41,11 +41,15 @@ export function makeLabelTexture(seed) {
   }
   ctx.font = '400 20px monospace'
   ctx.fillText(`PKG ${digits.slice(0, 3)} ${digits.slice(3, 6)} ${digits.slice(6)}`, 28, 326)
-  // QR-like code: 17x17 random modules with the three finder patterns
+  // QR-like code: 17x17 random modules with the three finder patterns (ring, gap, 3x3 centre)
   const n = 17, cell = 7, ox = 372, oy = 196
+  const finderOn = (u, v) => u === 0 || u === 6 || v === 0 || v === 6 || (u >= 2 && u <= 4 && v >= 2 && v <= 4)
   for (let i = 0; i < n; i++) for (let j = 0; j < n; j++) {
-    const finder = (i < 7 && j < 7) || (i < 7 && j >= n - 7) || (i >= n - 7 && j < 7)
-    const on = finder ? ((i % 6 === 0 || j % 6 === 0 || (i >= 2 && i <= 4 && j >= 2 && j <= 4)) ^ (i >= n - 7) ^ (j >= n - 7)) : rnd() < 0.45
+    let on
+    if (i < 7 && j < 7) on = finderOn(i, j)
+    else if (i < 7 && j >= n - 7) on = finderOn(i, j - (n - 7))
+    else if (i >= n - 7 && j < 7) on = finderOn(i - (n - 7), j)
+    else on = rnd() < 0.45
     if (on) ctx.fillRect(ox + j * cell, oy + i * cell, cell, cell)
   }
   const texture = new THREE.CanvasTexture(canvas)

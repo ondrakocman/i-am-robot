@@ -45,6 +45,32 @@ function rotationError(target, cur, out, o) {
   out[o] = x * k; out[o + 1] = y * k; out[o + 2] = z * k
 }
 
+// Solves A x = b in place for a symmetric positive-definite 7x7 A (Cholesky)
+function cholSolve(A, b) {
+  for (let j = 0; j < N; j++) {
+    let s = A[j * N + j]
+    for (let k = 0; k < j; k++) s -= A[j * N + k] * A[j * N + k]
+    const d = Math.sqrt(Math.max(s, 1e-12))
+    A[j * N + j] = d
+    for (let i = j + 1; i < N; i++) {
+      let t = A[i * N + j]
+      for (let k = 0; k < j; k++) t -= A[i * N + k] * A[j * N + k]
+      A[i * N + j] = t / d
+    }
+  }
+  for (let i = 0; i < N; i++) {
+    let t = b[i]
+    for (let k = 0; k < i; k++) t -= A[i * N + k] * b[k]
+    b[i] = t / A[i * N + i]
+  }
+  for (let i = N - 1; i >= 0; i--) {
+    let t = b[i]
+    for (let k = i + 1; k < N; k++) t -= A[k * N + i] * b[k]
+    b[i] = t / A[i * N + i]
+  }
+  return b
+}
+
 export class ArmIK {
   constructor(mj, m, side, posture) {
     const id = (type, name) => {
@@ -62,7 +88,8 @@ export class ArmIK {
 
     this.e = new Float64Array(6)
     this.J = new Float64Array(6 * N)
-    this.w = { Jp: new Float64Array(3 * N), Jr: new Float64Array(3 * N), Jpi: new Float64Array(3 * N), N1: new Float64Array(N * N), JrN: new Float64Array(3 * N), JrNi: new Float64Array(3 * N), Jpn: new Float64Array(3 * N), N1n: new Float64Array(N * N), JrNm: new Float64Array(3 * N), JrNmi: new Float64Array(3 * N), p1: new Float64Array(N), dq: new Float64Array(N), p: new Float64Array(N), tmp: new Float64Array(6), M: new Float64Array(9), locked: new Uint8Array(N), scale: new Float64Array(N) }
+    this.A = new Float64Array(N * N)
+    this.b = new Float64Array(N)
     this.qc = new Float64Array(4)
   }
 
@@ -70,17 +97,19 @@ export class ArmIK {
    * Moves the arm joints in `d.qpos` toward the palm target. `d` is a scratch MjData that holds the commanded
    * configuration (not the physical state), so contact never drags the IK solution around.
    *
-   * Each iteration: a damped least-squares step on the palm position, the palm orientation solved in the
-   * null space of the position (an orientation the wrist cannot reach then costs orientation error only, it
-   * never drags the palm off the operator's hand), and a step toward the rest posture in the null space of
-   * both, which chooses where the elbow goes without moving the palm. Joints at a limit are locked out of
-   * the step; shoulder and elbow are made expensive so orientation changes go to the wrist first.
+   * Each iteration is one damped least-squares step with a rest-posture regularizer in the normal equations.
+   * The regularizer is deliberately in the task solve, not in its null space: it keeps every joint quiet and
+   * the arm's configuration near the posture, which is what makes the arm feel calm in the headset. The price
+   * is a configuration-dependent offset of up to ~2 cm between a reachable target and where the palm settles
+   * (median 18 mm over random targets); the operator closes that loop by eye, the raw hand pose and the robot
+   * state are both recorded, and scripts/sim-check.mjs checks goal reachability with this offset included.
+   * A null-space formulation was tried (bias-free, 0.3 mm) and rejected by operators: joints visibly moved
+   * on their own and the arm felt springy.
    */
   solve(mj, d, targetPos, targetQuat, {
-    iterations = 4, rotWeight = 0.35, damping = 1e-3, postureGain = 0.2, maxStep = 0.3, jointScale = null,
+    iterations = 4, rotWeight = 0.35, damping = 1e-3, postureWeight = 3e-3, maxStep = 0.3,
   } = {}) {
-    const { m, e, J, qc, jnt } = this
-    this.w.scale.set(jointScale ?? DEFAULT_JOINT_SCALE)
+    const { m, e, J, A, b, qc, qadr, jnt } = this
     for (let it = 0; it < iterations; it++) {
       mj.mj_kinematics(m, d)
       const sp = d.site_xpos, s3 = 3 * this.site
@@ -102,108 +131,27 @@ export class ArmIK {
         J[4 * N + k] = a1 * rotWeight
         J[5 * N + k] = a2 * rotWeight
       }
-      this.prioritySolve(damping, postureGain, maxStep, d.qpos)
-    }
-  }
 
-  /**
-   * One iteration of the two-priority step on the current e and J:
-   *   dq = Jp+ ep  +  N1 (Jr N1)+ (er - Jr Jp+ ep)  +  N (posture - q) * gain
-   * with damped pseudo-inverses (3x3 inversions), N1 the null space of the position rows, N of all rows.
-   */
-  prioritySolve(damping, postureGain, maxStep, qpos) {
-    const { J, qadr, w } = this
-    const { Jp, Jr, dq, locked } = w
-    locked.fill(0)
-    // A joint at its limit that the step would push further out is removed from the solve (its columns
-    // zeroed) and the step recomputed, so the other joints take over instead of the residual being lost
-    for (let pass = 0; pass < 3; pass++) {
-      for (let i = 0; i < 3 * N; i++) { Jp[i] = J[i]; Jr[i] = J[3 * N + i] }
-      for (let k = 0; k < N; k++) if (locked[k]) for (let r = 0; r < 3; r++) { Jp[r * N + k] = 0; Jr[r * N + k] = 0 }
-      this.priorityStep(damping, postureGain, qpos)
-      let newlyLocked = false
-      for (let k = 0; k < N; k++) {
-        if (locked[k]) { dq[k] = 0; continue }
-        const q = qpos[qadr[k]]
-        if ((q <= this.lo[k] && dq[k] < 0) || (q >= this.hi[k] && dq[k] > 0)) { locked[k] = 1; newlyLocked = true }
+      // (J^T J + (damping + postureWeight) I) dq = J^T e + postureWeight (posture - q)
+      const qpos = d.qpos
+      for (let i = 0; i < N; i++) {
+        let bi = 0
+        for (let r = 0; r < 6; r++) bi += J[r * N + i] * e[r]
+        b[i] = bi + postureWeight * (this.posture[i] - qpos[qadr[i]])
+        for (let k = 0; k <= i; k++) {
+          let s = 0
+          for (let r = 0; r < 6; r++) s += J[r * N + i] * J[r * N + k]
+          A[i * N + k] = s
+          A[k * N + i] = s
+        }
+        A[i * N + i] += damping + postureWeight
       }
-      if (!newlyLocked) break
-    }
-    for (let i = 0; i < N; i++) {
-      const step = Math.max(-maxStep, Math.min(maxStep, dq[i]))
-      qpos[qadr[i]] = Math.max(this.lo[i], Math.min(this.hi[i], qpos[qadr[i]] + step))
-    }
-  }
+      cholSolve(A, b)
 
-  // dq for the current Jp/Jr (locked columns already zeroed). Solved in a scaled joint space (column k of J
-  // times scale[k]): a joint with a small scale is expensive, so the minimum-norm step prefers the wrist for
-  // orientation changes instead of swinging the shoulder and elbow out.
-  priorityStep(damping, postureGain, qpos) {
-    const { e, qadr, w } = this
-    const { Jp, Jr, Jpi, N1, JrN, JrNi, dq, tmp, M, locked, scale } = w
-    for (let k = 0; k < N; k++) for (let r = 0; r < 3; r++) { Jp[r * N + k] *= scale[k]; Jr[r * N + k] *= scale[k] }
-    pinv3(Jp, damping, Jpi, M)                          // Jpi: 7x3
-    for (let i = 0; i < N; i++) dq[i] = Jpi[3 * i] * e[0] + Jpi[3 * i + 1] * e[1] + Jpi[3 * i + 2] * e[2]
-    // N1 = I - Jpi Jp
-    for (let i = 0; i < N; i++) for (let k = 0; k < N; k++) {
-      let s = i === k ? 1 : 0
-      for (let r = 0; r < 3; r++) s -= Jpi[3 * i + r] * Jp[r * N + k]
-      N1[i * N + k] = s
+      for (let i = 0; i < N; i++) {
+        const dq = Math.max(-maxStep, Math.min(maxStep, b[i]))
+        qpos[qadr[i]] = Math.max(this.lo[i], Math.min(this.hi[i], qpos[qadr[i]] + dq))
+      }
     }
-    // orientation residual after the position step, solved inside N1
-    for (let r = 0; r < 3; r++) {
-      let s = e[3 + r]
-      for (let k = 0; k < N; k++) s -= Jr[r * N + k] * dq[k]
-      tmp[r] = s
-      for (let k = 0; k < N; k++) { let t = 0; for (let j = 0; j < N; j++) t += Jr[r * N + j] * N1[j * N + k]; JrN[r * N + k] = t }
-    }
-    pinv3(JrN, damping, JrNi, M)
-    for (let i = 0; i < N; i++) {
-      let s = 0
-      for (let k = 0; k < N; k++) s += N1[i * N + k] * (JrNi[3 * k] * tmp[0] + JrNi[3 * k + 1] * tmp[1] + JrNi[3 * k + 2] * tmp[2])
-      dq[i] += s
-    }
-    // Posture in the null space of both tasks: p1 = (I - Jp+ Jp) p, then p2 = p1 - N1 (Jr N1)+ (Jr p1). These
-    // projectors use a far smaller damping than the task steps: with the task damping the projection leaks
-    // near a stretched arm and the posture pull would settle the palm millimetres off the target.
-    const { Jpn, N1n, JrNm, JrNmi, p, p1 } = w
-    pinv3(Jp, NULL_DAMPING, Jpn, M)
-    for (let i = 0; i < N; i++) for (let k = 0; k < N; k++) {
-      let s = i === k ? 1 : 0
-      for (let r = 0; r < 3; r++) s -= Jpn[3 * i + r] * Jp[r * N + k]
-      N1n[i * N + k] = s
-    }
-    for (let r = 0; r < 3; r++) for (let k = 0; k < N; k++) { let t = 0; for (let j = 0; j < N; j++) t += Jr[r * N + j] * N1n[j * N + k]; JrNm[r * N + k] = t }
-    pinv3(JrNm, NULL_DAMPING, JrNmi, M)
-    for (let i = 0; i < N; i++) p[i] = locked[i] ? 0 : postureGain * (this.posture[i] - qpos[qadr[i]]) / scale[i]
-    for (let i = 0; i < N; i++) { let s = 0; for (let k = 0; k < N; k++) s += N1n[i * N + k] * p[k]; p1[i] = s }
-    for (let r = 0; r < 3; r++) { let s = 0; for (let k = 0; k < N; k++) s += Jr[r * N + k] * p1[k]; tmp[r] = s }
-    for (let i = 0; i < N; i++) {
-      let s = p1[i]
-      for (let k = 0; k < N; k++) s -= N1n[i * N + k] * (JrNmi[3 * k] * tmp[0] + JrNmi[3 * k + 1] * tmp[1] + JrNmi[3 * k + 2] * tmp[2])
-      dq[i] += s
-    }
-    for (let i = 0; i < N; i++) dq[i] *= scale[i]
-  }
-}
-
-// shoulder 0.35, elbow 0.5, wrist 1: see priorityStep
-const DEFAULT_JOINT_SCALE = [0.35, 0.35, 0.35, 0.5, 1, 1, 1]
-const NULL_DAMPING = 1e-8 // for the null-space projectors (the task steps use the `damping` option)
-
-// Damped pseudo-inverse of a 3x7 matrix: out (7x3) = A^T (A A^T + damping I)^-1; M is 3x3 scratch
-function pinv3(A, damping, out, M) {
-  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
-    let s = r === c ? damping : 0
-    for (let k = 0; k < N; k++) s += A[r * N + k] * A[c * N + k]
-    M[3 * r + c] = s
-  }
-  const [a, b, c, d, e, f, g, h, i] = M
-  const det = a * (e * i - f * h) - b * (d * i - f * g) + c * (d * h - e * g)
-  const inv = [(e * i - f * h), (c * h - b * i), (b * f - c * e), (f * g - d * i), (a * i - c * g), (c * d - a * f), (d * h - e * g), (b * g - a * h), (a * e - b * d)].map(x => x / det)
-  for (let k = 0; k < N; k++) for (let c2 = 0; c2 < 3; c2++) {
-    let s = 0
-    for (let r = 0; r < 3; r++) s += A[r * N + k] * inv[3 * r + c2]
-    out[3 * k + c2] = s
   }
 }

@@ -4,10 +4,13 @@
 //   2. every episode replays bit-for-bit (qpos and qvel) from its header + actions + events, and MuJoCo
 //      raised no warnings
 //   3. an injected instability ends the episode as 'unstable', keeping the frames recorded before it
-//   4. every goal region the task declares is reachable by the hand that serves it
-//   5. resets over several seeds start from physically valid states (no object penetration)
+//   4. every goal region the task declares is reachable by the hand that serves it (2 cm: the IK's deliberate
+//      posture regularizer settles up to ~2 cm short of a target, see ik.js)
+//   5. resets over several seeds start from physically valid states (no object penetration), and so does every
+//      teleport a task performs during the checked episodes and every pose its spawnPoses() can draw
 //   6. every geom the renderer draws has a material (collision-only geoms belong in group 3; an unmaterialed
 //      box drawn in default grey over a visual mesh is the classic mistake)
+//   7. a task's failureCase() ends the episode with the outcome it promises (the scoring's failure paths run)
 //   node scripts/sim-check.mjs [task=<name>|all] [dt=0.002] [n=3] [seeds=25] [out=episodes.iamr]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
@@ -57,6 +60,10 @@ for (const task of tasks) {
     meta: { session: 'sim-check', app_version: 'sim-check', mujoco: MUJOCO_VERSION, assets }, // same header fields as the headset
   })
   if (!task.autopilot) console.log('no scripted demonstration for this task: checking goal detection from the solved configuration')
+  // every teleport a task performs mid-episode (spawns, solved placement) must land in a valid state
+  let worstTeleport = 0
+  const teleport = sim.teleportObject.bind(sim)
+  sim.teleportObject = (...args) => { teleport(...args); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
   const t0 = performance.now()
   let steps = 0
   let solvedFor = 0
@@ -74,6 +81,8 @@ for (const task of tasks) {
   console.log(`${steps} steps, ${ms.toFixed(3)} ms/step (${(ms / (sim.dt * 1000) * 100).toFixed(0)}% of real time on one core)`)
   if (warningCount(sim.d)) fail('MuJoCo raised warnings after the last episode')
   if (episodes.length < runs) fail(`only ${episodes.length}/${runs} episodes finished`)
+  if (worstTeleport > MAX_PENETRATION) fail(`a teleport during the episodes landed ${(worstTeleport * 1000).toFixed(1)} mm inside something`)
+  else console.log(`teleports during the episodes: deepest penetration ${(worstTeleport * 1000).toFixed(2)} mm`)
   for (const e of episodes) {
     const h = e.header
     const warned = Object.entries(h.mujoco_warnings).filter(([, n]) => n).map(([k, n]) => `${k}=${n}`)
@@ -112,7 +121,7 @@ for (const task of tasks) {
   if (task.reachTargets) {
     const probe = new TaskSim(mj, m, task, { seed: 1 })
     let unreachable = 0
-    for (const { side, point, tolerance = 0.01 } of task.reachTargets(probe)) {
+    for (const { side, point, tolerance = 0.02 } of task.reachTargets(probe)) {
       const arm = probe.arms[side]
       const ik = probe.ikData
       mj.mj_resetData(m, ik)
@@ -137,6 +146,37 @@ for (const task of tasks) {
   }
   console.log(`reset check: deepest object penetration over ${seeds} seeds ${(worst * 1000).toFixed(2)} mm`)
   if (worst > MAX_PENETRATION) fail(`resets start interpenetrating (${(worst * 1000).toFixed(1)} mm > ${MAX_PENETRATION * 1000} mm)`)
+
+  // 5b. every pose the task's spawner can draw must be valid too
+  if (task.spawnPoses) {
+    const probe = new TaskSim(mj, m, task, { seed: 3 })
+    let worstSpawn = 0, bad = null
+    for (const { body, pos, quat } of task.spawnPoses(probe)) {
+      probe.teleportObject(body, pos, quat)
+      mj.mj_forward(m, probe.d)
+      const pen = probe.maxObjectPenetration()
+      if (pen > worstSpawn) { worstSpawn = pen; bad = { body, pos, quat } }
+      probe.placeObject(body, [-3 - 0.3 * body, 0, 0.05])
+    }
+    if (worstSpawn > MAX_PENETRATION) fail(`spawn pose ${JSON.stringify(bad)} starts ${(worstSpawn * 1000).toFixed(1)} mm inside something`)
+    else console.log(`spawn check: ${task.spawnPoses(probe).length} poses, deepest penetration ${(worstSpawn * 1000).toFixed(2)} mm`)
+    probe.dispose()
+  }
+
+  // 7. the scoring's failure path: the task sets up a state that must end as the outcome it promises
+  if (task.failureCase) {
+    const got = []
+    const probe = new TaskSim(mj, m, task, { seed: 5, onEpisode: e => got.push(e) })
+    let expect = null
+    holdReadyPose(probe)
+    probe.scheduleAtFrame(Math.round(SOLVE_AT_S / probe.controlDt), () => { expect = task.failureCase(probe) })
+    while (!got.length && probe.steps < (task.timeout + 5) / probe.dt) probe.step()
+    const h = got[0]?.header
+    if (!h) fail('failure case produced no episode')
+    else if (h.outcome !== expect.outcome || (expect.result && !expect.result(h.result))) fail(`failure case ended as ${h.outcome} ${JSON.stringify(h.result)}, expected ${expect.outcome}`)
+    else console.log(`failure case: episode ended as '${h.outcome}' as promised`)
+    probe.dispose()
+  }
 
   // 6. rendered geoms (group <= 2, as sim.worker.js describes the scene) must carry a material
   const bare = []
