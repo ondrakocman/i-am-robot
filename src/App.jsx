@@ -38,9 +38,9 @@ export default function App() {
         if (status) status.textContent = 'Quest ready'
         if (instructions) instructions.style.display = 'none'
       }
-    })
+    }).catch(err => { if (status) status.textContent = `WebXR unavailable: ${err.message}` })
 
-    const enter = () => xrStore.enterVR()
+    const enter = () => xrStore.enterVR().catch(err => { if (status) status.textContent = `Could not enter VR: ${err.message}` })
     btn.addEventListener('click', enter)
     return () => btn.removeEventListener('click', enter)
   }, [])
@@ -56,7 +56,12 @@ export default function App() {
       option.textContent = t.title ?? t.instruction
       return option
     }))
-    select.value = TASKS[params.get('task')] ? params.get('task') : DEFAULT_TASK
+    const requested = params.get('task')
+    select.value = TASKS[requested] ? requested : DEFAULT_TASK
+    if (requested && !TASKS[requested]) {
+      const status = document.getElementById('sim-status')
+      if (status) status.textContent = `Unknown task "${requested}"; choose one from the list`
+    }
     const onChange = () => {
       params.set('task', select.value)
       location.search = params.toString()
@@ -77,12 +82,16 @@ export default function App() {
       download.disabled = clear.disabled = total === 0
     })
     const onDownload = async () => {
-      const url = URL.createObjectURL(await exportEpisodes())
-      const a = document.createElement('a')
-      a.href = url
-      a.download = `iamr_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
-      a.click()
-      setTimeout(() => URL.revokeObjectURL(url), 10000)
+      try {
+        const url = URL.createObjectURL(await exportEpisodes())
+        const a = document.createElement('a')
+        a.href = url
+        a.download = `iamr_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
+        a.click()
+        setTimeout(() => URL.revokeObjectURL(url), 10000)
+      } catch (err) {
+        count.textContent = `Export failed: ${err.message}`
+      }
     }
     const onClear = () => { if (confirm('Delete all recorded episodes from this headset?')) clearEpisodes() }
     download.addEventListener('click', onDownload)

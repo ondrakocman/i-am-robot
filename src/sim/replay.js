@@ -55,7 +55,8 @@ export function replayEpisode(mj, m, header, frames, { onFrame = null } = {}) {
       for (let k = 0; k < header.nq; k++) if (q32[k] !== frames[o + field.qpos.offset + k]) { mismatch = i; break }
       if (mismatch < 0) for (let k = 0; k < header.nv; k++) if (v32[k] !== frames[o + field.qvel.offset + k]) { mismatch = i; break }
       if (mismatch >= 0) break
-      if (onFrame) onFrame(i, d)
+      // d.xpos/xquat still describe the previous substep: run forward kinematics on this frame's qpos first
+      if (onFrame) { mj.mj_kinematics(m, d); onFrame(i, d) }
       // Logged teleports (spawns) come after the frame they are tagged with, before the steps to the next one
       for (; ev < header.events.length && header.events[ev].tick === i; ev++) {
         const e = header.events[ev]

@@ -8,9 +8,6 @@
 
 const smooth = (a, b, u) => { u = Math.max(0, Math.min(1, u)); u = u * u * (3 - 2 * u); return a + (b - a) * u }
 
-// Grip site relative to the palm site (x forward, y toward the fingers' closing side)
-const GRIP_OFFSET = [[0.0735, -0.038], [0.0735, 0.038]]
-
 /**
  * Keyframes for one hand picking an object at `from` and releasing it with the grip site at `to`, as
  * [time, grip x, y, z, palm yaw, finger closure]. The hand approaches from its own side (+y for the left
@@ -40,8 +37,6 @@ export function pickPlaceKeys(side, rest, from, to, { t0 = 0, lift = 0.13, carry
   ]
 }
 
-export const PICK_PLACE_DURATION = 11
-
 /** Interpolates a keyframe list at time t -> [gx, gy, gz, yaw, close]. */
 export function sampleKeys(keys, t) {
   let i = 0
@@ -52,10 +47,13 @@ export function sampleKeys(keys, t) {
   return a.map((v, k) => smooth(v, b[k], u))
 }
 
-/** Writes one hand's operator input (tracked, palm pose, fingers) for a grip-site target. */
-export function writeHandInput(input, offset, side, [gx, gy, gz, yaw, close]) {
+/**
+ * Writes one hand's operator input (tracked, palm pose, fingers) for a grip-site target.
+ * `gripOffset` is the grip site relative to the palm site (TaskSim.gripOffset[side]).
+ */
+export function writeHandInput(input, offset, gripOffset, [gx, gy, gz, yaw, close]) {
   const c = Math.cos(yaw), s = Math.sin(yaw)
-  const [ox, oy] = GRIP_OFFSET[side]
+  const [ox, oy] = gripOffset
   input[offset] = 1
   // palm = grip - R(yaw) * gripOffset; palm frame = world rotated by yaw about z
   input[offset + 1] = gx - (c * ox - s * oy)

@@ -1,6 +1,6 @@
 <!--
-  Cube sorting: six 3D-printed PLA cubes, two of each colour, into the matching bins (the bin is the user's
-  own model, converted by scripts/convert-object.py). Robot faces +x, +y is the robot's left, z is up.
+  Cube sorting: six 3D-printed PLA cubes, two of each colour, into the matching bins (a real bin model,
+  public/models/objects/bin/source.stl, converted by scripts/convert-object.py). Robot faces +x, +y is the robot's left, z is up.
 -->
 <mujoco model="g1_cube_sort">
   <include file="g1_upper.xml"/>

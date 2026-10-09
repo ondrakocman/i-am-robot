@@ -1,5 +1,5 @@
-# Offline tools (scripts/*.py)
-numpy>=1.26
-trimesh>=4.0
-coacd>=1.0
-fast-simplification>=0.1
+# Offline tools (scripts/*.py); Python >= 3.9. Pinned so regenerated assets match the committed ones.
+numpy==2.4.2
+trimesh==4.12.2
+coacd==1.0.7
+fast-simplification==0.1.11

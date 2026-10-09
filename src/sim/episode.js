@@ -40,13 +40,13 @@ export function decodeEpisodes(buffer) {
   return episodes
 }
 
-/** Fixed-layout frame log, grown on demand. `fields` is [{ name, size }] in frame order. */
+/** Fixed-layout frame log. `fields` is [{ name, size }] in frame order; `capacity` frames are preallocated. */
 export class EpisodeRecorder {
-  constructor(fields) {
+  constructor(fields, capacity = 50 * 60) {
     let offset = 0
     this.fields = fields.map(f => { const r = { ...f, offset }; offset += f.size; return r })
     this.frameSize = offset
-    this.buf = new Float32Array(this.frameSize * 50 * 60)
+    this.buf = new Float32Array(this.frameSize * capacity)
     this.frames = 0
   }
 

@@ -30,11 +30,8 @@ export function retargetHand(joints) {
     index: { curl: [0, 0] },
     middle: { curl: [0, 0] },
   }
-  if (!joints) return result
-
   const get = (name) => joints[name]?.position
 
-  const wrist = get('wrist')
   const thumbMeta = get('thumb-metacarpal')
   const thumbProx = get('thumb-phalanx-proximal')
   const thumbDist = get('thumb-phalanx-distal')
@@ -45,7 +42,7 @@ export function retargetHand(joints) {
   const middleMeta = get('middle-finger-metacarpal')
 
   // Thumb abduction: angle between thumb bone and index bone directions
-  if (wrist && thumbMeta && thumbProx && thumbDist && thumbTip && indexMeta && indexProx) {
+  if (thumbMeta && thumbProx && thumbDist && thumbTip && indexMeta && indexProx) {
     _v0.copy(thumbProx).sub(thumbMeta).normalize()
     _v1.copy(indexProx).sub(indexMeta).normalize()
     const angle = Math.acos(clamp(_v0.dot(_v1), -1, 1))

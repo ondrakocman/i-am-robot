@@ -34,8 +34,10 @@ Pick the task on the landing page (or `?task=`):
   real model, converted with `scripts/convert-object.py`).
 
 Static tasks succeed when the goal holds with every object at rest and both hands off them for 0.5 s; the
-conveyor task ends when all packages have left the output belt. Then the episode is saved and the scene
-re-randomizes (object placement, mass, friction, belt speed), all logged.
+conveyor task ends once every package has been scored (delivered or dropped), `success` only if all were
+tag-up. Episodes also end on a drop, a timeout, 5 s without tracked hands, leaving VR, or a MuJoCo instability
+(saved with outcome `unstable`). Then the episode is saved and the scene re-randomizes (object placement, mass,
+friction, belt speed), all logged.
 
 Adding a task: one module in `src/sim/tasks/` (scene XML, object list, `reset`/`randomize`, `goal` or `update`,
 optional `solved` for the headless check) and a line in `tasks/index.js`.
@@ -49,14 +51,14 @@ npm run check        # lint + headless task checks (the CI gate)
 npm run build
 ```
 
-URL options: `?task=<name>`, `?dt=0.002|0.0025|0.004|0.005` (physics timestep; control stays at 50 Hz),
+URL options: `?task=<name>`, `?dt=0.001|0.002|0.0025|0.004|0.005` (physics timestep; control stays at 50 Hz),
 `?autopilot` (scripted demo of the tube task, no headset needed), `?view=eye` (desktop preview from the robot's head).
 
 ## Data
 
 ```
 python3 scripts/load_episodes.py episodes.iamr      # numpy arrays per field (see the docstring for the layout)
-node scripts/replay.mjs episodes.iamr               # verifies every episode replays bit-for-bit
+node scripts/replay.mjs episodes.iamr [poses.ndjson] # verifies bit-exact replay; optionally streams body poses
 ```
 
 Per episode, at 50 Hz: `action` (actuator targets; the first `robot_nu` are the robot's, in `actuator_names`
@@ -64,9 +66,10 @@ order: waist ×3, then per arm 7 arm joints followed by 7 hand joints; the two h
 different orders, so slice by name), `qpos`/`qvel` (full simulation state including the objects), `input`
 (retargeted operator command), `raw` (head pose and all 25 WebXR joints per hand, zero when untracked),
 `touching`. The header holds the task and its language instruction, layout, seed, outcome and per-task result,
-randomized `physics`, logged teleport `events`, initial and final state, `peak_arm_velocity` and `flags`
-(`fast_motion` above 6 rad/s), the real-time factor during the episode, SHA-256 hashes of every model file,
-and the app commit and MuJoCo version.
+randomized `physics`, logged teleport `events`, initial and final state, `peak_arm_velocity`, MuJoCo warning
+counters and `flags` (`fast_motion` above 6 rad/s, `slow_physics` if the headset fell below 0.9× real time,
+`unstable`), the real-time factor during the episode, SHA-256 hashes of every model file, and the app commit
+and MuJoCo version. Episodes are numbered per session; `session` + `episode` is the unique key.
 
 Replay: `initial_qpos` + `initial_ctrl` + `physics` + actions + events reproduce `qpos`/`qvel` exactly with the
 same `@mujoco/mujoco` build (`src/sim/replay.js` is the reference). A renderer needs only the logged `qpos`, so
@@ -99,6 +102,7 @@ data, so get consent before sharing datasets recorded by others.
 - `scripts/sim-check.mjs` headless gate (reset validity, task success, bit-exact replay, MuJoCo warnings);
   `scripts/replay.mjs`; `scripts/load_episodes.py`
 - `scripts/build-g1-mjcf.py`, `scripts/build-conveyor-scene.py`, `scripts/decimate-meshes.py`,
-  `scripts/convert-object.py` regenerate every generated asset (`pip install -r requirements.txt`)
+  `scripts/convert-object.py` regenerate the generated assets (`pip install -r requirements.txt`, Python ≥ 3.9;
+  decimation and convex decomposition are only reproducible with the pinned versions)
 
 License: MIT (see `LICENSE`); third-party assets in `THIRD_PARTY.md`.

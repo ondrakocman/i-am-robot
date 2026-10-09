@@ -10,8 +10,10 @@ import { encodeEpisode } from './episode.js'
 
 const TICK_MS = 4
 const MAX_CATCHUP_MS = 20     // per tick; beyond this the sim runs slower than real time instead of freezing
-const POST_INTERVAL_MS = 8
+const POST_INTERVAL_MS = 8    // body poses while running
+const IDLE_POST_INTERVAL_MS = 50
 const INPUT_TIMEOUT_MS = 150  // no input message for this long (headset off, tab hidden) = hands untracked
+const GEOM_TYPES = ['plane', 'hfield', 'sphere', 'capsule', 'ellipsoid', 'cylinder', 'box', 'mesh'] // mjtGeom order
 
 let mj = null
 let sim = null
@@ -64,6 +66,8 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
     type: 'ready',
     scene,
     eye: sim.eyePosition(),
+    // palm site relative to the wrist body, per hand: where the renderer measures the ghost-hand gap
+    palmOffset: sim.arms.map(a => [0, 1, 2].map(k => m.site_pos[3 * a.palmSite + k])),
     task: { name: task.name, instruction: task.instruction, title: task.title ?? task.instruction, objects: task.objects, resetButton: COMMON.resetButton },
     timestep: sim.dt,
   }, transfer)
@@ -80,6 +84,9 @@ function tick() {
   if (sim.status === 'waiting') {
     sim.step() // physics frozen; just polls input and the reset button
     owed = 0
+    // the real-time window measures stepping only: restart it so idle time doesn't count as slow physics
+    perf.windowStart = now
+    perf.simTime = perf.stepMs = perf.steps = 0
   } else {
     const dt = sim.dt
     while (owed >= dt) {
@@ -102,7 +109,7 @@ function tick() {
     sim.reportRealtime(perf.rtf)
   }
 
-  if (now - lastPost >= POST_INTERVAL_MS) {
+  if (now - lastPost >= (sim.status === 'waiting' ? IDLE_POST_INTERVAL_MS : POST_INTERVAL_MS)) {
     lastPost = now
     const out = sim.writeBodies(bodies ?? new Float32Array(7 * sim.m.nbody))
     bodies = null
@@ -128,7 +135,7 @@ function tick() {
 function describeScene(m) {
   const name = (type, i) => mj.mj_id2name(m, mj.mjtObj[type].value, i) ?? ''
   const MESH = mj.mjtGeom.mjGEOM_MESH.value
-  const bodies = Array.from({ length: m.nbody }, (_, b) => name('mjOBJ_BODY', b))
+  const bodies = Array.from({ length: m.nbody }, (_, b) => ({ name: name('mjOBJ_BODY', b), robot: sim.isRobotBody(b) }))
   const geoms = []
   const meshes = {}
   const transfer = []
@@ -153,7 +160,7 @@ function describeScene(m) {
     geoms.push({
       name: name('mjOBJ_GEOM', g),
       body: m.geom_bodyid[g],
-      type,
+      type: GEOM_TYPES[type] ?? 'other',
       size: Array.from(m.geom_size.slice(3 * g, 3 * g + 3)),
       pos: Array.from(m.geom_pos.slice(3 * g, 3 * g + 3)),
       quat: Array.from(m.geom_quat.slice(4 * g, 4 * g + 4)),

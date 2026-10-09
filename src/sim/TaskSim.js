@@ -14,6 +14,8 @@
 //   autopilot?(sim, t) -> per-hand grip targets, solved?(sim) for the headless check.
 //   Per-episode task state belongs in `sim.taskState` (set in reset), never on the module object.
 //   Teleports done by a task while running must go through sim.teleportObject so replay can re-apply them.
+//   update() runs after the frame's action was recorded: a task must only write ctrl in reset() (belt motors),
+//   never in update(), or replay from the log would silently differ.
 //   An event's `tick` is the index of the last frame recorded before the teleport: replay applies it after
 //   comparing that frame and before stepping on to the next (see replay.js).
 
@@ -40,6 +42,8 @@ export const RAW_SIZE = 7 + 2 * 25 * 7
 // Shared across tasks
 export const COMMON = {
   restSpeed: 0.05,              // m/s: objects must be slower than this for the goal to count
+  restSpin: 0.5,                // rad/s: and turning slower than this
+  untrackedTimeout: 5,          // s without any tracked hand before a running episode is abandoned
   successHold: 0.5,             // s the goal must hold with both hands off the objects
   endHold: 1.5,                 // s to show the outcome before the next episode
   minEpisode: 1,                // s: shorter episodes are discarded, not saved
@@ -67,7 +71,8 @@ const ARM_SPEED = [3, 3, 3, 3, 5, 5, 5]
 // is blocked by contact the target stops running ahead, so the motor pushes with a bounded force and the
 // arm doesn't whip when it comes free. With kp=80 this caps the extra torque at ~10 Nm (wrist kp=40: ~5 Nm).
 const ARM_LEAD = 0.12
-const ROBOT_BODY = /_link$|^pelvis$/
+// MuJoCo warning slots (mjtWarning order); a non-zero count means MuJoCo hit a bad state and reset the data
+const WARNINGS = ['inertia', 'contact_full', 'constraint_full', 'bad_qpos', 'bad_qvel', 'bad_qacc', 'bad_ctrl']
 
 function mulberry32(seed) {
   let a = seed >>> 0
@@ -101,7 +106,9 @@ export class TaskSim {
     this.meta = meta
     this.armLead = armLead
 
-    this.dt = m.opt.timestep
+    const opt = m.opt
+    this.dt = opt.timestep
+    opt.delete()
     if (!TIMESTEPS.some(t => Math.abs(t - this.dt) < 1e-9)) {
       throw new Error(`timestep ${this.dt} must be one of ${TIMESTEPS.join(', ')} so control stays at ${CONTROL_HZ} Hz`)
     }
@@ -117,6 +124,9 @@ export class TaskSim {
     this.name = (type, i) => mj.mj_id2name(m, mj.mjtObj[type].value, i) ?? ''
     this.bodyId = name => id('mjOBJ_BODY', name)
     this.eyeSite = id('mjOBJ_SITE', 'eye')
+    // The robot is the kinematic tree rooted at the pelvis (fixed base); everything else is scene
+    const pelvis = id('mjOBJ_BODY', 'pelvis')
+    this.isRobotBody = b => m.body_rootid[b] === pelvis
 
     const mirror = (pose, side) => ARM_JOINTS.map(n => (MIRRORED.has(n) && side === 'right' ? -1 : 1) * pose[n])
     this.arms = SIDES.map(side => {
@@ -136,13 +146,14 @@ export class TaskSim {
       }
     })
     this.armDof = this.arms.flatMap(a => Array.from(a.ik.jnt, j => m.jnt_dofadr[j]))
+    // Grip site relative to the palm site (both on the wrist body): where a held object's centre sits
+    this.gripOffset = this.arms.map(a => [0, 1, 2].map(k => m.site_pos[3 * a.gripSite + k] - m.site_pos[3 * a.palmSite + k]))
 
     // Robot actuators come first in the model (the robot file is included before the scene); scene actuators
     // such as belt motors follow and are recorded in `action` too, after the robot's.
-    const actuatorBody = a => this.name('mjOBJ_BODY', m.jnt_bodyid[m.actuator_trnid[2 * a]])
     this.robotNu = 0
     for (let a = 0; a < m.nu; a++) {
-      if (ROBOT_BODY.test(actuatorBody(a))) {
+      if (this.isRobotBody(m.jnt_bodyid[m.actuator_trnid[2 * a]])) {
         if (a !== this.robotNu) throw new Error('robot actuators must precede scene actuators')
         this.robotNu++
       }
@@ -180,14 +191,19 @@ export class TaskSim {
     this.qvelNames = []
     for (let j = 0; j < m.njnt; j++) {
       const n = this.name('mjOBJ_JOINT', j)
-      if (m.jnt_type[j] === 0) { // free joint
+      const type = m.jnt_type[j] // mjtJoint: 0 free, 1 ball, 2 slide, 3 hinge
+      if (type === 0) {
         this.qposNames.push(...['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz'].map(s => `${n}:${s}`))
         this.qvelNames.push(...['vx', 'vy', 'vz', 'wx', 'wy', 'wz'].map(s => `${n}:${s}`))
+      } else if (type === 1) {
+        this.qposNames.push(...['qw', 'qx', 'qy', 'qz'].map(s => `${n}:${s}`))
+        this.qvelNames.push(...['wx', 'wy', 'wz'].map(s => `${n}:${s}`))
       } else {
         this.qposNames.push(n)
         this.qvelNames.push(n)
       }
     }
+    if (this.qposNames.length !== m.nq || this.qvelNames.length !== m.nv) throw new Error('joint naming does not cover qpos/qvel')
     this.actuatorNames = Array.from({ length: m.nu }, (_, a) => this.name('mjOBJ_ACTUATOR', a))
 
     this.input = new Float32Array(INPUT_SIZE)
@@ -201,8 +217,11 @@ export class TaskSim {
       { name: 'input', size: INPUT_SIZE },
       { name: 'raw', size: RAW_SIZE },
       { name: 'touching', size: 2 },
-    ])
+    ], Math.ceil((task.timeout + 1) * CONTROL_HZ)) // preallocated: no buffer growth inside the physics loop
     this.rtf = { min: Infinity, sum: 0, n: 0 } // real-time factor samples supplied by the host while running
+    this.warnings = new Int32Array(WARNINGS.length)
+    this.lastQpos = new Float64Array(m.nq)
+    this.lastQvel = new Float64Array(m.nv)
 
     this.episode = 0
     this.reset()
@@ -235,6 +254,12 @@ export class TaskSim {
     this.rtf.n++
   }
 
+  /** Frees the WASM-side data; the model belongs to the caller. */
+  dispose() {
+    this.d.delete()
+    this.ikData.delete()
+  }
+
   reset() {
     const { mj, m, d, task } = this
     if (this.status === 'running') this.endEpisode('aborted')
@@ -264,6 +289,8 @@ export class TaskSim {
     this.frameIndex = 0
     this.peakArmVel = 0
     this.rtf = { min: Infinity, sum: 0, n: 0 }
+    this.warnings.fill(0)
+    this.untrackedFor = 0
     this.status = 'waiting' // until the operator's hands show up
     this.steps = 0
     this.startTime = 0
@@ -289,6 +316,26 @@ export class TaskSim {
   objectSpeed(i) {
     const v = this.objects[i].v
     return Math.hypot(this.d.qvel[v], this.d.qvel[v + 1], this.d.qvel[v + 2])
+  }
+
+  objectSpin(i) {
+    const v = this.objects[i].v + 3
+    return Math.hypot(this.d.qvel[v], this.d.qvel[v + 1], this.d.qvel[v + 2])
+  }
+
+  /**
+   * MuJoCo warning counters since the episode started. Any BAD_* count means MuJoCo hit an invalid state and
+   * reset the data mid-episode; the episode is then ended as 'unstable'. Read once per control tick.
+   */
+  readWarnings() {
+    const w = this.d.warning // reference view: elements may be deleted, the vector must not be
+    let changed = false
+    for (let i = 0; i < WARNINGS.length; i++) {
+      const x = w.get(i)
+      if (x.number !== this.warnings[i]) { this.warnings[i] = x.number; changed = true }
+      x.delete()
+    }
+    return changed
   }
 
   /** z component of the object's own +z axis in the world: 1 upright, 0 on its side, -1 upside down. */
@@ -393,7 +440,12 @@ export class TaskSim {
     if (this.status === 'running') {
       for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
       this.recorder.push([d.time - this.startTime, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
+      this.lastQpos.set(d.qpos)
+      this.lastQvel.set(d.qvel)
       this.frameIndex++
+      this.untrackedFor = anyTracked ? 0 : this.untrackedFor + this.controlDt
+      if (this.readWarnings()) { this.endEpisode('unstable'); return }
+      if (this.untrackedFor > COMMON.untrackedTimeout) { this.endEpisode('lost_tracking'); return }
       for (const s of this.scheduled.splice(0)) {
         if (s.tick === this.frameIndex - 1) s.fn()
         else if (s.tick > this.frameIndex - 1) this.scheduled.push(s)
@@ -447,7 +499,7 @@ export class TaskSim {
       let settled = task.goal(this) && !this.touching[0] && !this.touching[1]
       let dropped = false
       for (let i = 0; i < this.objects.length; i++) {
-        if (this.objectSpeed(i) > COMMON.restSpeed) settled = false
+        if (this.objectSpeed(i) > COMMON.restSpeed || this.objectSpin(i) > COMMON.restSpin) settled = false
         if (this.objectPos(i)[2] < task.dropZ) dropped = true
       }
       if (this.status === 'running') {
@@ -478,9 +530,12 @@ export class TaskSim {
     this.status = outcome
     this.endTime = d.time
     const duration = d.time - this.startTime
-    this.lastSaved = this.onEpisode && duration >= COMMON.minEpisode
-    if (!this.lastSaved) return false
+    if (!this.onEpisode || duration < COMMON.minEpisode) return false
     const frames = this.recorder.snapshot()
+    const flags = []
+    if (this.peakArmVel > COMMON.fastMotion) flags.push('fast_motion')
+    if (outcome === 'unstable') flags.push('unstable')
+    if (this.rtf.n && this.rtf.min < 0.9) flags.push('slow_physics')
     this.onEpisode({
       header: {
         format: EPISODE_FORMAT,
@@ -503,11 +558,13 @@ export class TaskSim {
         objects: task.objects,
         peak_arm_velocity: this.peakArmVel,
         realtime_factor: this.rtf.n ? { min: this.rtf.min, mean: this.rtf.sum / this.rtf.n } : null,
-        flags: this.peakArmVel > COMMON.fastMotion ? ['fast_motion'] : [],
+        mujoco_warnings: Object.fromEntries(WARNINGS.map((n, i) => [n, this.warnings[i]])),
+        flags,
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
-        final_qpos: Array.from(d.qpos),
-        final_qvel: Array.from(d.qvel),
+        // state at the last recorded control tick (teleports done by the task in that tick are not included)
+        final_qpos: Array.from(this.lastQpos),
+        final_qvel: Array.from(this.lastQvel),
         events: this.events,
         result: task.result ? task.result(this) : undefined,
         nq: m.nq, nv: m.nv, nu: m.nu,
@@ -549,7 +606,7 @@ export class TaskSim {
     inp.fill(0)
     for (let s = 0; s < 2; s++) {
       const g = hands[s] ?? [...this.readyGrip[s], 0, 0]
-      writeHandInput(inp, s * HAND_INPUT, s, g)
+      writeHandInput(inp, s * HAND_INPUT, this.gripOffset[s], g)
     }
     return inp
   }

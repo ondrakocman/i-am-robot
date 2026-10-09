@@ -78,10 +78,9 @@ export default {
 
     // Spawn the next package once the pool body is free and the spawn point is clear
     if (st.spawned < st.order.length && t >= st.nextSpawnAt) {
-      const plan = st.order[st.spawned]
-      const inUse = st.active.some(a => a.body === plan.body)
+      const plan = st.order[st.spawned] // pool bodies in the plan are distinct, so this one is free
       const spawnClear = !st.active.some(a => a.onInput && sim.objectPos(a.body)[1] > SPAWN_Y - 0.25)
-      if (!inUse && spawnClear) {
+      if (spawnClear) {
         const half = SIZES[Math.floor(plan.body / 2)]
         const quat = mulQuat([Math.cos(plan.yaw / 2), 0, 0, Math.sin(plan.yaw / 2)], FACE_UP[plan.face])
         sim.teleportObject(plan.body, [BELT_X, SPAWN_Y, restHeight(half, plan.face)], quat)

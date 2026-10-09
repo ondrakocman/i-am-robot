@@ -19,7 +19,6 @@ const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 
 const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0 })
 const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
 const DARK_MESH = /^(head_link|logo_link)$|_hand_palm_link$/   // palm mesh hangs off the (silver) wrist body
-const ROBOT_BODY = /_link$|^pelvis$/
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
 const SHADOW_CASTER_BODY = /elbow|wrist|hand/
 // Surface look per MuJoCo material name (colors come from the MJCF); anything else is a matte default
@@ -49,13 +48,13 @@ const GHOST_CHAINS = [
   ['wrist', 'index-finger-metacarpal', 'index-finger-phalanx-proximal', 'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip'],
   ['wrist', 'middle-finger-metacarpal', 'middle-finger-phalanx-proximal', 'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip'],
 ]
-const PALM_OFFSET = [new THREE.Vector3(0.0415, 0.003, 0), new THREE.Vector3(0.0415, -0.003, 0)]
 const TOUCH_EMISSIVE = new THREE.Color(0x0e4a26)
 const NO_EMISSIVE = new THREE.Color(0x000000)
 const CORRECTION = [XR_TO_URDF_L, XR_TO_URDF_R]
 const RAW_HAND = 25 * 7
 const HAND_DROPOUT_S = 0.2   // tracking gap after which the filters restart from the new pose
 const HUD_HZ = 4
+const STALL_MS = 500         // no state from the worker for this long = physics stalled
 
 // three.js plane facing the robot (normal -x in the MuJoCo frame), text running toward the robot's right
 const FACING_ROBOT = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(
@@ -78,24 +77,28 @@ export function MujocoScene() {
   const workerRef = useRef(null)
   const [world, setWorld] = useState(null)
   const latest = useRef(null)
-  const applied = useRef(null)
   // What the HUD knows about storage: committed counts plus in-flight / failed saves
   const saves = useRef({ total: 0, success: 0, pending: 0, failed: 0, persistent: null, error: null })
-  const xr = useRef({ session: null, refSpace: null, calibrated: false, hands: [newHandState(), newHandState()] })
+  const xr = useRef({ session: null, refSpace: null, onReset: null, calibrated: false, hands: [newHandState(), newHandState()] })
   const input = useRef({ input: new Float32Array(INPUT_SIZE), raw: new Float32Array(RAW_SIZE) })
+  const lastState = useRef({ at: 0, info: null })
 
   useEffect(() => {
     const worker = new Worker(new URL('../sim/sim.worker.js', import.meta.url), { type: 'module' })
     workerRef.current = worker
     setStatusText('Loading physics…')
     const fail = message => {
+      if (saves.current.error) return
       console.error('[sim]', message)
       saves.current.error = 'PHYSICS ERROR — reload the page'
       setStatusText('Physics failed: ' + message.split('\n')[0])
     }
     worker.onmessage = ({ data }) => {
       if (data.type === 'state') {
+        // only the newest state is rendered; hand a skipped one's buffer straight back to the worker
+        if (latest.current) worker.postMessage({ type: 'state-buffer', bodies: latest.current.bodies }, [latest.current.bodies.buffer])
         latest.current = data
+        lastState.current = { at: performance.now(), info: data.info }
       } else if (data.type === 'ready') {
         setWorld(buildWorld(data))
         setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`)
@@ -158,11 +161,15 @@ export function MujocoScene() {
   useFrame((_state, delta, xrFrame) => {
     if (!world) return
     const s = latest.current
-    if (s && s !== applied.current) {
-      applied.current = s
+    if (s) {
+      latest.current = null
       applyBodies(world, s.bodies)
       workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies }, [s.bodies.buffer])
       applyInfo(world, s.info, saves.current)
+    } else if (lastState.current.info && performance.now() - lastState.current.at > STALL_MS) {
+      // the worker stopped posting (crashed tick, throttled tab): say so on the in-VR panel, not just the DOM
+      if (!saves.current.error) saves.current.error = 'PHYSICS STALLED — reload the page'
+      world.hud.draw(lastState.current.info, saves.current)
     }
     if (!xrFrame) return
 
@@ -174,14 +181,19 @@ export function MujocoScene() {
       st.session = session
       st.calibrated = false
       st.hands.forEach(h => { h.lastSeen = -Infinity })
-      // Leaving VR ends the running episode; the worker's input watchdog also stops the hands
-      session.addEventListener('end', () => { workerRef.current?.postMessage({ type: 'abort' }) }, { once: true })
+      // Leaving VR, or taking the headset off (the session goes hidden), ends the running episode; the
+      // worker's input watchdog also stops the hands
+      const abort = () => workerRef.current?.postMessage({ type: 'abort' })
+      session.addEventListener('end', abort, { once: true })
+      session.addEventListener('visibilitychange', () => { if (session.visibilityState === 'hidden') abort() })
     }
     if (st.refSpace !== refSpace) {
+      st.refSpace?.removeEventListener('reset', st.onReset)
       st.refSpace = refSpace
       st.calibrated = false
       // Quest "recenter": the reference space moves, so the world must be placed again
-      refSpace.addEventListener('reset', () => { st.calibrated = false })
+      st.onReset = () => { st.calibrated = false }
+      refSpace.addEventListener('reset', st.onReset)
     }
 
     const viewer = xrFrame.getViewerPose(refSpace)
@@ -213,11 +225,11 @@ export function MujocoScene() {
 
 // ── Scene construction ──────────────────────────────────────────────────────
 
-function buildWorld({ scene, eye, task }) {
+function buildWorld({ scene, eye, task, palmOffset }) {
   const root = new THREE.Group()
   root.quaternion.copy(ROBOT_BASE_QUAT)
 
-  const bodies = scene.bodies.map(name => {
+  const bodies = scene.bodies.map(({ name }) => {
     const g = new THREE.Group()
     g.name = name
     root.add(g)
@@ -231,9 +243,9 @@ function buildWorld({ scene, eye, task }) {
 
   const objects = new Set(task.objects)
   for (const geom of scene.geoms) {
-    const bodyName = scene.bodies[geom.body]
+    const bodyName = scene.bodies[geom.body].name
     const meshName = geom.mesh >= 0 ? scene.meshes[geom.mesh].name : ''
-    const isRobot = ROBOT_BODY.test(bodyName)
+    const isRobot = scene.bodies[geom.body].robot
     let material
     if (!isRobot) {
       const key = geom.material + '|' + geom.rgba.join(',') + (geom.mesh >= 0 ? '|flat' : '')
@@ -298,7 +310,8 @@ function buildWorld({ scene, eye, task }) {
   const ghostGroup = new THREE.Group()
   const ghosts = [makeGhostHand(), makeGhostHand()]
   ghosts.forEach(g => ghostGroup.add(g.group))
-  const wristBodies = ['left', 'right'].map(side => bodies[scene.bodies.indexOf(`${side}_wrist_yaw_link`)])
+  const wristBodies = ['left', 'right'].map(side => bodies[scene.bodies.findIndex(b => b.name === `${side}_wrist_yaw_link`)])
+  const palmOffsets = palmOffset.map(p => new THREE.Vector3().fromArray(p))
 
   const hud = makeHud(task.title)
   hud.mesh.position.set(0.8, 0, 1.04)
@@ -309,27 +322,25 @@ function buildWorld({ scene, eye, task }) {
   reset.group.position.fromArray(task.resetButton)
   root.add(reset.group)
 
-  return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies }
+  return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies, palmOffsets }
 }
-
-const MJ_GEOM = { PLANE: 0, SPHERE: 2, CAPSULE: 3, ELLIPSOID: 4, CYLINDER: 5, BOX: 6, MESH: 7 }
 
 function geomGeometry(g, meshes, cache) {
   const [s0, s1, s2] = g.size
   switch (g.type) {
-    case MJ_GEOM.PLANE: return new THREE.PlaneGeometry(s0 > 0 ? 2 * s0 : 30, s1 > 0 ? 2 * s1 : 30)
-    case MJ_GEOM.SPHERE: return new THREE.SphereGeometry(s0, 24, 16)
-    case MJ_GEOM.CAPSULE: return new THREE.CapsuleGeometry(s0, 2 * s1, 8, 16).rotateX(Math.PI / 2)
-    case MJ_GEOM.ELLIPSOID: return new THREE.SphereGeometry(1, 24, 16).scale(s0, s1, s2)
-    case MJ_GEOM.CYLINDER: {
+    case 'plane': return new THREE.PlaneGeometry(s0 > 0 ? 2 * s0 : 30, s1 > 0 ? 2 * s1 : 30)
+    case 'sphere': return new THREE.SphereGeometry(s0, 24, 16)
+    case 'capsule': return new THREE.CapsuleGeometry(s0, 2 * s1, 8, 16).rotateX(Math.PI / 2)
+    case 'ellipsoid': return new THREE.SphereGeometry(1, 24, 16).scale(s0, s1, s2)
+    case 'cylinder': {
       if (g.material !== 'tube') return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
       // Hollow tube with a 2 mm wall; the physics has a matching ring of thin boxes (see tube_box.xml)
       const ri = s0 - 0.002
       const profile = [[ri, -s1], [s0, -s1], [s0, s1], [ri, s1], [ri, -s1]].map(([x, y]) => new THREE.Vector2(x, y))
       return new THREE.LatheGeometry(profile, 48).rotateX(Math.PI / 2)
     }
-    case MJ_GEOM.BOX: return new THREE.BoxGeometry(2 * s0, 2 * s1, 2 * s2)
-    case MJ_GEOM.MESH: {
+    case 'box': return new THREE.BoxGeometry(2 * s0, 2 * s1, 2 * s2)
+    case 'mesh': {
       if (!cache.has(g.mesh)) {
         const { vert, face } = meshes[g.mesh]
         const geo = new THREE.BufferGeometry()
@@ -418,6 +429,8 @@ const STATUS_TEXT = {
   partial: ['DONE — NOT ALL CORRECT', '#ffb35d'],
   dropped: ['DROPPED — RESETTING', '#ffb35d'],
   timeout: ['TIMEOUT — RESETTING', '#ffb35d'],
+  lost_tracking: ['HANDS LOST — RESETTING', '#ffb35d'],
+  unstable: ['PHYSICS UNSTABLE — RESETTING', '#ff5d5d'],
   aborted: ['RESET', '#9fb4c8'],
 }
 
@@ -561,18 +574,8 @@ function readOperator(xrFrame, session, refSpace, world, hands, dt, input, raw) 
     if (s < 0) continue
     const h = hands[s]
     seen[s] = true
-    const joints = {}
-    XR_JOINT_NAMES.forEach((name, i) => {
-      const space = source.hand.get(name)
-      const pose = space && xrFrame.getJointPose(space, refSpace)
-      if (!pose) return
-      const j = h.joints[name]
-      const { position: p, orientation: q } = pose.transform
-      j.position.set(p.x, p.y, p.z)
-      j.quaternion.set(q.x, q.y, q.z, q.w)
-      joints[name] = j
-      writePose(j.position, j.quaternion, raw, 7 + s * RAW_HAND + 7 * i)
-    })
+    const joints = readHandJoints(xrFrame, source.hand, refSpace, h)
+    XR_JOINT_NAMES.forEach((name, i) => { if (joints[name]) writePose(joints[name].position, joints[name].quaternion, raw, 7 + s * RAW_HAND + 7 * i) })
     const wrist = joints.wrist
     if (!wrist) continue
 
@@ -590,11 +593,42 @@ function readOperator(xrFrame, session, refSpace, world, hands, dt, input, raw) 
       f.middle.curl[0], f.middle.curl[1]], o + 8)
 
     // Ghost: fade in with the gap between where the operator's wrist is and where the robot palm got to
-    world.wristBodies[s].localToWorld(_palm.copy(PALM_OFFSET[s]))
+    world.wristBodies[s].localToWorld(_palm.copy(world.palmOffsets[s]))
     const gap = _palm.distanceTo(pos)
     world.ghosts[s].update(joints, Math.min(1, Math.max(0, (gap - GHOST_SHOW_AT) / (GHOST_FULL_AT - GHOST_SHOW_AT))))
   }
   for (let s = 0; s < 2; s++) if (!seen[s]) world.ghosts[s].group.visible = false
+}
+
+// All 25 joints in one call where the browser supports it (fillPoses), else one getJointPose per joint
+function readHandJoints(xrFrame, hand, refSpace, h) {
+  const joints = {}
+  if (!h.spaces) {
+    h.spaces = XR_JOINT_NAMES.map(n => hand.get(n))
+    h.poses = new Float32Array(XR_JOINT_NAMES.length * 16)
+    h.matrix = new THREE.Matrix4()
+    h.scale = new THREE.Vector3()
+  }
+  if (xrFrame.fillPoses && h.spaces.every(Boolean) && xrFrame.fillPoses(h.spaces, refSpace, h.poses)) {
+    XR_JOINT_NAMES.forEach((name, i) => {
+      const o = 16 * i
+      if (h.poses[o + 15] === 0) return // NaN/zero matrix = untracked joint
+      const j = h.joints[name]
+      h.matrix.fromArray(h.poses, o).decompose(j.position, j.quaternion, h.scale)
+      if (Number.isFinite(j.position.x)) joints[name] = j
+    })
+    return joints
+  }
+  XR_JOINT_NAMES.forEach((name, i) => {
+    const pose = h.spaces[i] && xrFrame.getJointPose(h.spaces[i], refSpace)
+    if (!pose) return
+    const j = h.joints[name]
+    const { position: p, orientation: q } = pose.transform
+    j.position.set(p.x, p.y, p.z)
+    j.quaternion.set(q.x, q.y, q.z, q.w)
+    joints[name] = j
+  })
+  return joints
 }
 
 function setStatusText(text) {

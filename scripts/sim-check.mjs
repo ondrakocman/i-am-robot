@@ -4,7 +4,7 @@
 //      solved configuration (on a frame boundary, so it is a logged event) and goal detection must fire
 //   3. every episode replays bit-for-bit (qpos and qvel) from its header + actions + events
 //   4. MuJoCo raised no warnings (instability, constraint overflow)
-//   node scripts/sim-check.mjs [task=tube_box] [dt=0.002] [n=3] [seeds=25]
+//   node scripts/sim-check.mjs [task=tube_box] [dt=0.002] [n=3] [seeds=25] [out=episodes.iamr]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -13,6 +13,7 @@ import { loadScene } from '../src/sim/loadScene.js'
 import { TaskSim } from '../src/sim/TaskSim.js'
 import { getTask } from '../src/sim/tasks/index.js'
 import { applyPhysics, compiledPhysics, replayEpisode } from '../src/sim/replay.js'
+import { encodeEpisode } from '../src/sim/episode.js'
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 const MAX_PENETRATION = 0.002 // m: contact softness allows ~1 mm at rest; anything deeper is a bad reset
@@ -28,7 +29,8 @@ const fail = msg => { failures++; console.error('FAIL:', msg) }
 
 const mj = await loadMujoco()
 const readFile = async p => (p.endsWith('.xml') ? fs.readFile(path.join(PUBLIC, p), 'utf8') : new Uint8Array(await fs.readFile(path.join(PUBLIC, p))))
-const { model: m } = await loadScene(mj, readFile, { scene: task.scene, timestep })
+const { model: m, assets } = await loadScene(mj, readFile, { scene: task.scene, timestep })
+const MUJOCO_VERSION = JSON.parse(await fs.readFile(new URL('../node_modules/@mujoco/mujoco/package.json', import.meta.url))).version
 const base = compiledPhysics(m) // before anything randomizes the model, like the headset's fresh load
 // d.warning is a reference view into MjData (unlike d.contact): read it, never delete it
 const warningCount = d => { const w = d.warning; let n = 0; for (let i = 0; i < w.size(); i++) n += w.get(i).number; return n }
@@ -36,7 +38,10 @@ console.log(`task ${task.name}  timestep ${timestep}  nq=${m.nq} nv=${m.nv} nu=$
 
 // 1. episodes (the recording sim is built on the fresh model, as on the headset)
 const episodes = []
-const sim = new TaskSim(mj, m, task, { seed: 7, autopilot: true, onEpisode: e => episodes.push(e) })
+const sim = new TaskSim(mj, m, task, {
+  seed: 7, autopilot: true, onEpisode: e => episodes.push(e),
+  meta: { session: 'sim-check', app_version: 'sim-check', mujoco: MUJOCO_VERSION, assets }, // same header fields as the headset
+})
 if (!task.autopilot) console.log('no scripted demonstration for this task: checking goal detection from the solved configuration')
 const t0 = performance.now()
 let steps = 0
@@ -52,11 +57,12 @@ while (episodes.length < runs && steps < runs * (task.timeout + 5) / sim.dt) {
 }
 const ms = (performance.now() - t0) / steps
 console.log(`${steps} steps, ${ms.toFixed(3)} ms/step (${(ms / (sim.dt * 1000) * 100).toFixed(0)}% of real time on one core)`)
-const warnings = warningCount(sim.d)
-if (warnings) fail(`MuJoCo raised ${warnings} warnings`)
+if (warningCount(sim.d)) fail('MuJoCo raised warnings after the last episode')
 if (episodes.length < runs) fail(`only ${episodes.length}/${runs} episodes finished`)
 for (const e of episodes) {
   const h = e.header
+  const warned = Object.entries(h.mujoco_warnings).filter(([, n]) => n).map(([k, n]) => `${k}=${n}`)
+  if (warned.length) fail(`episode ${h.episode} raised MuJoCo warnings ${warned.join(' ')}`)
   const phys = Object.entries(h.physics).map(([k, v]) => `${k} ${v.mass.toFixed(2)}kg/mu${v.friction.toFixed(2)}`).join(' ')
   console.log(`episode ${h.episode}: ${h.outcome} after ${h.duration.toFixed(2)} s, ${h.frames} frames, peak arm ${h.peak_arm_velocity.toFixed(1)} rad/s${h.flags.length ? ' FLAGS ' + h.flags : ''}${h.events.length ? `, ${h.events.length} events` : ''}${h.result ? ' ' + JSON.stringify(h.result) : ''}\n    ${phys}`)
   if (h.outcome !== 'success') fail(`episode ${h.episode} ended with ${h.outcome}`)
@@ -75,11 +81,15 @@ let worst = 0
 for (let seed = 1; seed <= seeds; seed++) {
   const probe = new TaskSim(mj, m, task, { seed })
   worst = Math.max(worst, probe.maxObjectPenetration())
-  probe.d.delete(); probe.ikData.delete()
+  probe.dispose()
 }
 console.log(`reset check: deepest object penetration over ${seeds} seeds ${(worst * 1000).toFixed(2)} mm`)
 if (worst > MAX_PENETRATION) fail(`resets start interpenetrating (${(worst * 1000).toFixed(1)} mm > ${MAX_PENETRATION * 1000} mm)`)
 
-sim.d.delete(); sim.ikData.delete(); m.delete()
+if (args.out) {
+  await fs.writeFile(args.out, Buffer.concat(episodes.map(e => Buffer.from(encodeEpisode(e.header, e.frames)))))
+  console.log(`wrote ${episodes.length} episodes to ${args.out}`)
+}
+sim.dispose(); m.delete()
 if (failures) { console.error(`${failures} check(s) failed`); process.exit(1) }
 console.log('all checks passed')

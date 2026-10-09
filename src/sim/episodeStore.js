@@ -2,15 +2,26 @@
 // the episode chunks concatenated (see episode.js and scripts/load_episodes.py).
 
 const DB_NAME = 'i-am-robot'
+const DB_VERSION = 2
 const STORE = 'episodes'
 
 let dbPromise = null
 function db() {
   dbPromise ??= new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1)
-    req.onupgradeneeded = () => req.result.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true })
-    req.onsuccess = () => resolve(req.result)
-    req.onerror = () => reject(req.error)
+    const req = indexedDB.open(DB_NAME, DB_VERSION)
+    req.onupgradeneeded = () => {
+      const d = req.result
+      const store = d.objectStoreNames.contains(STORE) ? req.transaction.objectStore(STORE) : d.createObjectStore(STORE, { keyPath: 'id', autoIncrement: true })
+      if (!store.indexNames.contains('success')) store.createIndex('success', 'success')
+    }
+    req.onsuccess = () => {
+      const d = req.result
+      // another tab upgrading the schema: let go of our connection so it can proceed
+      d.onversionchange = () => { d.close(); dbPromise = null }
+      resolve(d)
+    }
+    req.onerror = () => { dbPromise = null; reject(req.error) }
+    req.onblocked = () => reject(new Error('IndexedDB upgrade blocked by another tab'))
   })
   return dbPromise
 }
@@ -29,8 +40,8 @@ function run(mode, fn) {
 const listeners = new Set()
 let stats = null
 async function refreshStats() {
-  const all = await run('readonly', s => s.getAll())
-  stats = { total: all.length, success: all.filter(e => e.success).length }
+  const [total, success] = await Promise.all([run('readonly', s => s.count()), run('readonly', s => s.index('success').count(IDBKeyRange.only(1)))])
+  stats = { total, success }
   listeners.forEach(fn => fn(stats))
   return stats
 }
@@ -51,13 +62,15 @@ export async function requestPersistence() {
 
 /** Resolves once the episode is committed to disk; rejects (e.g. quota exceeded) otherwise. */
 export async function saveEpisode(header, buffer) {
-  await run('readwrite', s => s.add({ header, success: header.success, task: header.task, data: new Blob([buffer]) }))
+  // the success index needs a key, so booleans are stored as 0/1
+  await run('readwrite', s => s.add({ header, success: header.success ? 1 : 0, task: header.task, data: new Blob([buffer]) }))
   if (stats) {
     stats = { total: stats.total + 1, success: stats.success + (header.success ? 1 : 0) }
     listeners.forEach(fn => fn(stats))
   }
 }
 
+/** One Blob of every stored episode, in recording order. */
 export async function exportEpisodes() {
   const all = await run('readonly', s => s.getAll())
   return new Blob(all.map(e => e.data), { type: 'application/octet-stream' })
