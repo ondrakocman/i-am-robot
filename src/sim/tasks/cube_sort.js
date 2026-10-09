@@ -10,7 +10,7 @@ const SLOT_X = [0.20, 0.29]
 const SLOT_Y = [-0.12, 0, 0.12]
 const JITTER = 0.008
 const YAW_JITTER = 0.8
-const BIN_INNER = [0.09, 0.07]   // bin interior half extents minus a margin (bin is 0.22 x 0.18 outside)
+const BIN_INNER = [0.09, 0.07]   // bin interior half extents (0.106 x 0.086 collision) minus a margin
 const BIN_MAX_Z = 0.86           // cube centre must be below the bin rim (0.87)
 
 /** The six slots in random order, each jittered. */
