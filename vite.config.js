@@ -1,11 +1,11 @@
 import { execSync } from 'node:child_process'
-import { copyFileSync, cpSync, readFileSync } from 'node:fs'
+import { copyFileSync, cpSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import license from 'rollup-plugin-license'
+import { MUJOCO_VERSION } from './scripts/lib.mjs'
 
-const mujocoVersion = JSON.parse(readFileSync(new URL('./node_modules/@mujoco/mujoco/package.json', import.meta.url))).version
 let gitSha = 'unknown'
 try { gitSha = execSync('git describe --always --dirty', { stdio: ['ignore', 'pipe', 'ignore'] }).toString().trim() } catch { /* not a checkout */ }
 
@@ -39,8 +39,10 @@ export default defineConfig(({ command, isPreview }) => ({
   ],
   base: command === 'build' || isPreview ? basePath : '/',
   define: {
-    __MUJOCO_VERSION__: JSON.stringify(mujocoVersion),
-    __GIT_SHA__: JSON.stringify(gitSha),
+    __MUJOCO_VERSION__: JSON.stringify(MUJOCO_VERSION),
+    // the SHA is read once, when this config loads: a dev server keeps running across edits, so its
+    // recordings are tagged -dev rather than claiming a clean commit
+    __GIT_SHA__: JSON.stringify(command === 'serve' ? `${gitSha}-dev` : gitSha),
   },
   // MuJoCo's emscripten glue finds mujoco.wasm via import.meta.url; pre-bundling would break that
   optimizeDeps: { exclude: ['@mujoco/mujoco'] },

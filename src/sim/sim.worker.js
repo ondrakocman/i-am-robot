@@ -40,10 +40,13 @@ self.onmessage = ({ data: msg }) => {
     case 'state-buffer':
       bodies = msg.bodies
       break
+    case 'meta': // extra header fields known only to the main thread (XR frame rate once a session exists)
+      if (sim) sim.meta = { ...sim.meta, ...msg.meta }
+      break
   }
 }
 
-async function init({ baseUrl, timestep, autopilot, session, task: taskName, appVersion }) {
+async function init({ baseUrl, timestep, autopilot, session, task: taskName, appVersion, userAgent }) {
   const task = getTask(taskName)
   mj = await loadMujoco()
   const readFile = async path => {
@@ -54,7 +57,7 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
   const { model: m, assets } = await loadScene(mj, readFile, { scene: task.scene, timestep })
   sim = new TaskSim(mj, m, task, {
     autopilot,
-    meta: { session, app_version: appVersion, mujoco: __MUJOCO_VERSION__, assets },
+    meta: { session, app_version: appVersion, mujoco: __MUJOCO_VERSION__, assets, user_agent: userAgent },
     onEpisode: ({ header, frames }) => {
       // encode copies the frames once; the Blob crosses to the main thread without another copy
       self.postMessage({ type: 'episode', header, data: new Blob([encodeEpisode(header, frames)]) })

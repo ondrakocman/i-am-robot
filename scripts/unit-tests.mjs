@@ -89,6 +89,21 @@ test('episode file: encode -> decode round trip and corruption detection', () =>
   assert.throws(() => decodeEpisodes(encodeEpisode(bad, rec.snapshot())), /does not match/)
 })
 
+test('episode store: an upgrade blocked by an older tab fails over to memory instead of hanging', async () => {
+  // the previously deployed build opened the database at version 1 with no onversionchange handler: as long as
+  // such a tab is open, every open at version 2 stays blocked
+  globalThis.indexedDB = { open: () => { const r = {}; setTimeout(() => r.onblocked?.(), 0); return r } }
+  const store = await import('../src/sim/episodeStore.js?blocked=1')
+  const seen = []
+  store.onEpisodesChanged(s => seen.push({ ...s }))
+  const t0 = performance.now()
+  await assert.rejects(store.saveEpisode({ success: true, task: 't' }, new Blob([new Uint8Array(5)])), /another I Am Robot tab/)
+  assert.ok(performance.now() - t0 < store.BLOCKED_TIMEOUT_MS + 1000, 'gave up within the timeout')
+  assert.ok(seen.some(s => s.blocked && s.pending === 1), 'reported the blocked upgrade while the write was pending')
+  assert.deepEqual([seen.at(-1).pending, seen.at(-1).unsaved], [0, 1])
+  assert.equal((await store.exportEpisodes()).size, 5)
+})
+
 test('episode store: a failing database keeps episodes in memory and still exports them', async () => {
   // a broken IndexedDB (storage disabled, blocked, evicted) must never lose an episode or freeze the counters
   globalThis.indexedDB = { open: () => { const r = {}; setTimeout(() => { r.error = new Error('storage disabled'); r.onerror?.() }, 0); return r } }

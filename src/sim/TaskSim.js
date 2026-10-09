@@ -24,26 +24,15 @@ import { ArmIK, ARM_JOINTS } from './ik.js'
 import { EpisodeRecorder, EPISODE_FORMAT } from './episode.js'
 import { writeHandInput } from './autopilot.js'
 import { applyPhysics, compiledPhysics } from './replay.js'
+import { SIDES, HAND_INPUT, INPUT_SIZE, INPUT_NAMES, RAW_SIZE, RAW_LAYOUT, handOfBodyName } from './inputLayout.js'
 
+export { SIDES, HAND_INPUT, INPUT_SIZE, INPUT_NAMES, RAW_SIZE, RAW_LAYOUT }
 export const CONTROL_HZ = 50
-export const SIDES = ['left', 'right']
 export const FINGER_JOINTS = ['thumb_0', 'thumb_1', 'thumb_2', 'index_0', 'index_1', 'middle_0', 'middle_1']
 /** Physics timesteps that divide the control period exactly (so control stays at CONTROL_HZ). */
 export const TIMESTEPS = [0.001, 0.002, 0.0025, 0.004, 0.005]
 
-// Per-hand operator input: tracked, palm position (3), palm quaternion w,x,y,z (4), finger commands (7):
-// thumb rotation in [-1, 1], then curls in [0, 1] for thumb_1, thumb_2, index_0, index_1, middle_0, middle_1.
-// Positions/orientations are in the MuJoCo world frame (x forward, y left, z up).
-const HAND_INPUT_NAMES = ['tracked', 'palm_x', 'palm_y', 'palm_z', 'palm_qw', 'palm_qx', 'palm_qy', 'palm_qz',
-  'thumb_rotation', 'thumb_1', 'thumb_2', 'index_0', 'index_1', 'middle_0', 'middle_1']
-export const HAND_INPUT = HAND_INPUT_NAMES.length
-export const INPUT_SIZE = 2 * HAND_INPUT
-export const INPUT_NAMES = SIDES.flatMap(s => HAND_INPUT_NAMES.map(n => `${s}_${n}`))
-// Raw operator data, recorded for re-retargeting later: viewer (head) pose (pos 3 + quat wxyz 4), then for
-// each hand the 25 WebXR joints (pos 3 + quat wxyz 4), all in the MuJoCo world frame. An untracked joint is
-// all zeros (its quaternion has zero norm).
-export const RAW_SIZE = 7 + 2 * 25 * 7
-export const RAW_LAYOUT = { pose: ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz'], order: ['head', ...SIDES.map(s => `${s}_hand (25 WebXR joints)`)] }
+// The operator input and raw tracking layouts are in inputLayout.js (shared with the renderer).
 
 // Shared across tasks
 export const COMMON = {
@@ -170,13 +159,8 @@ export class TaskSim {
     }
 
     // Which hand (0 left, 1 right, -1 none) each body belongs to. The palm geom lives on the wrist_yaw body.
-    this.handOfBody = new Int8Array(m.nbody).fill(-1)
-    for (let b = 0; b < m.nbody; b++) {
-      const n = this.name('mjOBJ_BODY', b)
-      SIDES.forEach((s, i) => {
-        if (n.startsWith(`${s}_hand_`) || n === `${s}_wrist_yaw_link`) this.handOfBody[b] = i
-      })
-    }
+    this.bodyNames = Array.from({ length: m.nbody }, (_, b) => this.name('mjOBJ_BODY', b))
+    this.handOfBody = Int8Array.from(this.bodyNames, handOfBodyName)
 
     // Task objects: free bodies the hands manipulate
     this.objectOfGeom = new Int16Array(m.ngeom).fill(-1)
@@ -560,6 +544,7 @@ export class TaskSim {
         result: task.result ? task.result(this) : undefined,
         nq: m.nq, nv: m.nv, nu: m.nu,
         robot_nu: this.robotNu,
+        body_names: this.bodyNames,
         qpos_names: this.qposNames,
         qvel_names: this.qvelNames,
         actuator_names: this.actuatorNames,

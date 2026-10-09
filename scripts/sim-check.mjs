@@ -11,16 +11,14 @@
 //   node scripts/sim-check.mjs [task=<name>|all] [dt=0.002] [n=3] [seeds=25] [out=episodes.iamr]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { loadScene } from '../src/sim/loadScene.js'
 import { TaskSim, HAND_INPUT } from '../src/sim/TaskSim.js'
 import { TASKS, getTask } from '../src/sim/tasks/index.js'
 import { applyPhysics, compiledPhysics, replayEpisode } from '../src/sim/replay.js'
 import { encodeEpisode } from '../src/sim/episode.js'
 import { mat2quat } from '../src/sim/ik.js'
+import { MUJOCO_VERSION, readPublic as readFile } from './lib.mjs'
 
-const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 const MAX_PENETRATION = 0.002 // m: contact softness allows ~1 mm at rest; anything deeper is a bad reset
 const SOLVE_AT_S = 2
 
@@ -33,8 +31,6 @@ let failures = 0
 const fail = msg => { failures++; console.error('FAIL:', msg) }
 
 const mj = await loadMujoco()
-const readFile = async p => (p.endsWith('.xml') ? fs.readFile(path.join(PUBLIC, p), 'utf8') : new Uint8Array(await fs.readFile(path.join(PUBLIC, p))))
-const MUJOCO_VERSION = JSON.parse(await fs.readFile(new URL('../node_modules/@mujoco/mujoco/package.json', import.meta.url))).version
 // d.warning is a reference view into MjData: its elements may be deleted, the vector itself must not be
 const warningCount = d => { const w = d.warning; let n = 0; for (let i = 0; i < w.size(); i++) { const x = w.get(i); n += x.number; x.delete() } return n }
 

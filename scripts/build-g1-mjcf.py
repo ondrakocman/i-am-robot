@@ -4,8 +4,9 @@
 Usage: python3 scripts/build-g1-mjcf.py /path/to/mujoco_menagerie/unitree_g1
 
 The Menagerie commit of the checkout used is recorded in the output file's first line. The robot meshes are
-copied from Menagerie's assets folder into public/models/meshes (overwriting), then decimated separately by
-scripts/decimate-meshes.py. Requires Python >= 3.11 (see requirements.txt).
+copied from Menagerie's assets folder into public/models/meshes (overwriting) at full resolution: the operator
+looks at the hands all day from 30 cm away, and a Quest 3 draws the 630k triangles without trouble.
+Requires Python >= 3.11 (see requirements-tools.txt).
 
 Changes vs. the Menagerie model (BSD-3, see public/mujoco/LICENSE-g1):
   - fixed base: pelvis freejoint removed (upper-body manipulation, like Isaac's FixedBaseUpperBodyIK task)
@@ -65,10 +66,14 @@ for name, body in bodies.items():
             body.remove(el)
 
 leg_joint = re.compile(r'(hip|knee|ankle).*_joint')
-for sec in root.findall('actuator') + root.findall('sensor') + root.findall('contact'):
+for sec in root.findall('actuator') + root.findall('contact'):
     for el in list(sec):
         if any(leg_joint.search(v) for v in el.attrib.values()):
             sec.remove(el)
+# The IMU sensors serve the locomotion controller; a fixed-base teleop sim never reads them and they cost ~2% of
+# step time
+for sec in root.findall('sensor'):
+    root.remove(sec)
 
 # Gravity compensation on both arm subtrees
 for name, body in bodies.items():

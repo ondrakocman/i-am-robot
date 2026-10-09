@@ -3,7 +3,7 @@ import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
 import * as THREE from 'three'
 import { MujocoScene } from './components/MujocoScene.jsx'
-import { onEpisodesChanged, exportEpisodes, clearEpisodes } from './sim/episodeStore.js'
+import { onEpisodesChanged, episodeStats, exportEpisodes, clearEpisodes } from './sim/episodeStore.js'
 import { TASKS, DEFAULT_TASK } from './sim/tasks/index.js'
 
 const xrStore = createXRStore({
@@ -14,6 +14,8 @@ const xrStore = createXRStore({
   foveation: 1,
   frameRate: 'high',
 })
+
+let leaving = false // the operator confirmed a task switch; do not prompt again on the reload
 
 export default function App() {
   useEffect(() => {
@@ -63,6 +65,13 @@ export default function App() {
       if (status) status.textContent = `Unknown task "${requested}"; choose one from the list`
     }
     const onChange = () => {
+      // switching tasks reloads the page, which would drop an episode still being written or kept only in memory
+      const { pending, unsaved } = episodeStats()
+      if (pending + unsaved > 0 && !confirm('An episode is still being saved or has not been downloaded yet. Switching tasks reloads the page and loses it. Switch anyway?')) {
+        select.value = TASKS[requested] ? requested : DEFAULT_TASK
+        return
+      }
+      leaving = true
       params.set('task', select.value)
       location.search = params.toString()
     }
@@ -77,11 +86,18 @@ export default function App() {
     const count = document.getElementById('episode-count')
     const download = document.getElementById('download-episodes')
     const clear = document.getElementById('clear-episodes')
-    const unsubscribe = onEpisodesChanged(({ total, success, unsaved }) => {
+    const unsubscribe = onEpisodesChanged(({ total, success, unsaved, blocked }) => {
       count.textContent = (total ? `${total} episodes recorded (${success} successful)` : 'No episodes recorded yet')
         + (unsaved ? ` — ${unsaved} could not be stored, download now` : '')
+        + (blocked ? ' — close the other I Am Robot tabs so episodes can be stored' : '')
       download.disabled = clear.disabled = total + unsaved === 0
     })
+    // leaving the page while an episode is still being written, or exists only in memory, would lose it
+    const onUnload = e => {
+      const { pending, unsaved } = episodeStats()
+      if (!leaving && pending + unsaved > 0) { e.preventDefault(); e.returnValue = '' }
+    }
+    window.addEventListener('beforeunload', onUnload)
     const onDownload = async () => {
       try {
         const url = URL.createObjectURL(await exportEpisodes())
@@ -99,6 +115,7 @@ export default function App() {
     clear.addEventListener('click', onClear)
     return () => {
       unsubscribe()
+      window.removeEventListener('beforeunload', onUnload)
       download.removeEventListener('click', onDownload)
       clear.removeEventListener('click', onClear)
     }

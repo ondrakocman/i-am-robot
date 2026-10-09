@@ -3,7 +3,16 @@
 // Readers: decodeEpisodes below (JS) and scripts/load_episodes.py (Python).
 
 export const EPISODE_MAGIC = 0x524d4149 // "IAMR" read as little-endian u32
-export const EPISODE_FORMAT = 'iamr-episode-v1'
+export const EPISODE_FORMAT = 'iamr-episode-v2'
+// v1 (pre-release builds) has the same binary layout; its headers lack mujoco_warnings, realtime_factor,
+// body_names and raw_layout.hand_joints, and were recorded with an IK that biased the palm 1-3 cm off target
+export const READABLE_FORMATS = ['iamr-episode-v1', EPISODE_FORMAT]
+
+/** Validates a decoded header against its data length; throws on anything a reader cannot trust. */
+export function checkEpisode(header, dataBytes) {
+  if (!READABLE_FORMATS.includes(header.format)) throw new Error(`unsupported episode format ${header.format}`)
+  if (dataBytes !== header.frames * header.frame_size * 4) throw new Error(`episode ${header.episode}: data size does not match header (${dataBytes} bytes for ${header.frames} frames of ${header.frame_size})`)
+}
 
 export function encodeEpisode(header, frames) {
   const json = new TextEncoder().encode(JSON.stringify(header))
@@ -28,16 +37,19 @@ export function* iterateEpisodes(buffer) {
   const view = new DataView(buffer)
   let o = 0
   while (o < buffer.byteLength) {
+    const start = o
+    const truncated = () => new Error(`truncated file: episode at byte ${start} is incomplete`)
+    if (o + 8 > buffer.byteLength) throw truncated()
     if (view.getUint32(o, true) !== EPISODE_MAGIC) throw new Error(`bad magic at byte ${o}`)
     const headerBytes = view.getUint32(o + 4, true)
+    if (o + 12 + headerBytes > buffer.byteLength) throw truncated()
     const json = new TextDecoder().decode(new Uint8Array(buffer, o + 8, headerBytes)).replace(/\0+$/, '')
     const header = JSON.parse(json)
-    if (header.format !== EPISODE_FORMAT) throw new Error(`unsupported episode format ${header.format}`)
     o += 8 + headerBytes
     const dataBytes = view.getUint32(o, true)
     o += 4
-    if (o + dataBytes > buffer.byteLength) throw new Error(`truncated file: episode at byte ${o - 12 - headerBytes} is incomplete`)
-    if (dataBytes !== header.frames * header.frame_size * 4) throw new Error(`episode ${header.episode}: data size does not match header (${dataBytes} bytes for ${header.frames} frames of ${header.frame_size})`)
+    if (o + dataBytes > buffer.byteLength) throw truncated()
+    checkEpisode(header, dataBytes)
     // copy so the frames are 4-byte aligned regardless of the chunk offset
     const frames = new Float32Array(buffer.slice(o, o + dataBytes))
     o += dataBytes

@@ -1,0 +1,6 @@
+# Scene XML is hashed as text into every episode header: keep line endings stable across checkouts
+* text=auto eol=lf
+*.stl binary
+*.STL binary
+*.png binary
+*.wasm binary

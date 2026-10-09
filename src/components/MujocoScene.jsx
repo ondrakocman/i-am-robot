@@ -6,8 +6,8 @@ import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { QuaternionSmoother } from '../systems/Smoothing.js'
 import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
-import { XR_JOINT_NAMES, ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
-import { HAND_INPUT, INPUT_SIZE, RAW_SIZE } from '../sim/TaskSim.js'
+import { ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
+import { HAND_INPUT, INPUT_SIZE, RAW_SIZE, RAW_HAND, XR_JOINT_NAMES, handOfBodyName } from '../sim/inputLayout.js'
 import { saveEpisode, onEpisodesChanged, requestPersistence } from '../sim/episodeStore.js'
 import { hasTask } from '../sim/tasks/index.js'
 
@@ -39,7 +39,6 @@ const GHOST_CHAINS = [
 const TOUCH_EMISSIVE = new THREE.Color(0x0e4a26)
 const NO_EMISSIVE = new THREE.Color(0x000000)
 const CORRECTION = [XR_TO_URDF_L, XR_TO_URDF_R]
-const RAW_HAND = 25 * 7
 const HAND_DROPOUT_S = 0.2   // tracking gap after which the filters restart from the new pose
 const HUD_HZ = 4
 const STALL_MS = 500         // no state from the worker for this long = physics stalled
@@ -91,10 +90,8 @@ export function MujocoScene() {
         setWorld(buildWorld(data))
         setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`)
       } else if (data.type === 'episode') {
-        saves.current.pending++
         saveEpisode(data.header, data.data)
           .catch(err => console.error('[episodes] save failed, kept in memory for download', err))
-          .finally(() => { saves.current.pending-- })
       } else if (data.type === 'error') {
         fail(data.message)
       }
@@ -108,6 +105,7 @@ export function MujocoScene() {
       session: SESSION_ID,
       task: hasTask(params.get('task')) ? params.get('task') : undefined, // unknown names fall back like the selector
       appVersion: __GIT_SHA__,
+      userAgent: navigator.userAgent,
     })
     const unsubscribe = onEpisodesChanged(s => Object.assign(saves.current, s))
     requestPersistence().then(ok => { saves.current.persistent = ok }).catch(() => { saves.current.persistent = false })
@@ -158,6 +156,8 @@ export function MujocoScene() {
       // Leaving VR, or taking the headset off (the session goes hidden), ends the running episode; the
       // worker's input watchdog also stops the hands
       const abort = outcome => workerRef.current?.postMessage({ type: 'abort', outcome })
+      // the display rate the headset actually granted goes into every episode header
+      workerRef.current?.postMessage({ type: 'meta', meta: { xr_frame_rate: session.frameRate ?? null } })
       session.addEventListener('end', () => abort('aborted'), { once: true })
       session.addEventListener('visibilitychange', () => { if (session.visibilityState === 'hidden') abort('aborted') })
     }
@@ -265,8 +265,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
       }
       material = materialCache.get(key)
     } else {
-      const hand = bodyName.startsWith('left_hand_') || bodyName === 'left_wrist_yaw_link' ? 0
-        : bodyName.startsWith('right_hand_') || bodyName === 'right_wrist_yaw_link' ? 1 : -1
+      const hand = handOfBodyName(bodyName)
       const kind = PAD_BODY.test(bodyName) ? 2 : DARK_BODY.test(bodyName) || DARK_MESH.test(meshName) ? 1 : 0
       material = hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
     }
@@ -354,7 +353,7 @@ function geomGeometry(g, meshes, cache, override) {
         geo.setAttribute('position', new THREE.BufferAttribute(vert, 3))
         // MuJoCo faces are Int32; WebGL index buffers must be unsigned
         geo.setIndex(new THREE.BufferAttribute(new Uint32Array(face.buffer, face.byteOffset, face.length), 1))
-        geo.computeVertexNormals() // smooth normals suit the decimated robot; scene meshes (bins) use flatShading
+        geo.computeVertexNormals() // smooth normals suit the robot meshes; scene meshes (bins) use flatShading
         cache.set(g.mesh, geo)
       }
       return cache.get(g.mesh)
@@ -444,7 +443,7 @@ const STATUS_TEXT = {
   aborted: ['RESET', '#9fb4c8'],
 }
 
-function makeHud(instruction) {
+function makeHud(title) {
   const canvas = document.createElement('canvas')
   canvas.width = 1024
   canvas.height = 512
@@ -481,7 +480,7 @@ function makeHud(instruction) {
     ctx.fill()
     ctx.fillStyle = '#ffffff'
     ctx.font = '600 54px system-ui, sans-serif'
-    ctx.fillText(instruction, 56, 112)
+    ctx.fillText(title, 56, 112)
     ctx.fillStyle = color
     ctx.font = '700 64px system-ui, sans-serif'
     ctx.fillText(lines[0], 56, 228)
@@ -628,7 +627,7 @@ function readHandJoints(xrFrame, hand, refSpace, h) {
   if (xrFrame.fillPoses && h.spaces.every(Boolean) && xrFrame.fillPoses(h.spaces, refSpace, h.poses)) {
     XR_JOINT_NAMES.forEach((name, i) => {
       const o = 16 * i
-      if (h.poses[o + 15] === 0) return // an all-zero matrix = untracked joint (NaN is caught below)
+      if (!Number.isFinite(h.poses[o + 15]) || h.poses[o + 15] === 0) return // untracked joint: NaN per spec, zeros on some runtimes
       const j = h.joints[name]
       h.matrix.fromArray(h.poses, o).decompose(j.position, j.quaternion, h.scale)
       if (Number.isFinite(j.position.x)) joints[name] = j

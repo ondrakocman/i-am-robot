@@ -1,0 +1,5 @@
+# Asset tools (scripts/build-g1-mjcf.py, convert-object.py); Python >= 3.11 (numpy 2.4).
+# Pinned so regenerated assets match the committed ones.
+-r requirements.txt
+trimesh==4.12.2
+coacd==1.0.7
