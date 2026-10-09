@@ -79,7 +79,7 @@ test('soft lattice: positive tetrahedra, every tet edge once, outward surface wi
   const L = softLattice({ half, cells })
   assert.equal(L.n, 7 * 5 * 3)
   assert.equal(L.restVol.length, 5 * 6 * 4 * 2)
-  assert.ok(L.restVol.every(v => v > 0), 'tet volumes positive')
+  assert.ok(L.restVol.every(vol => vol > 0), 'tet volumes positive')
   assert.ok(Math.abs(L.restVol.reduce((a, b) => a + b, 0) - 8 * half[0] * half[1] * half[2]) < 1e-9, 'tets fill the box')
   assert.ok(L.restLen.every(l => l > 0.01))
   const faces = 2 * (cells[0] * cells[1] + cells[0] * cells[2] + cells[1] * cells[2])
@@ -131,7 +131,7 @@ test('episode store: an upgrade blocked by an older tab fails over to memory ins
 test('episode store: a failing database keeps episodes in memory and still exports them', async () => {
   // a broken IndexedDB (storage disabled, blocked, evicted) must never lose an episode or freeze the counters
   globalThis.indexedDB = { open: () => { const r = {}; setTimeout(() => { r.error = new Error('storage disabled'); r.onerror?.() }, 0); return r } }
-  globalThis.IDBKeyRange = { only: v => v }
+  globalThis.IDBKeyRange = { only: key => key }
   const store = await import('../src/sim/episodeStore.js')
   const seen = []
   store.onEpisodesChanged(s => seen.push({ ...s }))
@@ -139,8 +139,8 @@ test('episode store: a failing database keeps episodes in memory and still expor
   assert.equal(seen.at(-1).unsaved, 1)
   const { blob, partial } = await store.exportEpisodes()
   assert.deepEqual([blob.size, partial], [3, true])
-  await store.clearEpisodes()
-  assert.equal(seen.at(-1).unsaved, 0)
+  await store.clearEpisodes() // the database cannot be cleared, so the in-memory episode is kept too
+  assert.equal(seen.at(-1).unsaved, 1)
   // and a working database counts, indexes and exports normally
   await import('fake-indexeddb/auto')
   const fresh = await import('../src/sim/episodeStore.js?fresh=1')

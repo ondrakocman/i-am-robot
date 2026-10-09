@@ -39,6 +39,8 @@ export async function loadScene(mj, readFile, { scene, timestep } = {}) {
   ]
   for (const { dst } of files) mkdirTree(mj, `${VFS_ROOT}/meshes/${dst}`.split('/').slice(0, -1).join('/'))
   await Promise.all(files.map(async ({ src, dst }) => mj.FS.writeFile(`${VFS_ROOT}/meshes/${dst}`, await read(src))))
+  // the renderer's mesh manifest is not physics, but an episode's assets should name everything a re-render needs
+  await read('models/meshes/visual.json')
   mj.FS.writeFile(`${VFS_ROOT}/g1_upper.xml`, robot)
   mj.FS.writeFile(`${VFS_ROOT}/scene.xml`, xml)
   const model = mj.MjModel.from_xml_path(`${VFS_ROOT}/scene.xml`)

@@ -7,6 +7,8 @@ export const ARM_JOINTS = [
 ]
 
 const N = 7
+/** The solver and its defaults, written into every episode header. */
+export const IK_PARAMS = { solver: 'dls-posture-regularized', iterations: 4, rotWeight: 0.35, damping: 1e-3, postureWeight: 3e-3, maxStep: 0.3 }
 
 // MuJoCo quaternions are [w, x, y, z]
 export function mat2quat(m, o, out) {
@@ -107,7 +109,7 @@ export class ArmIK {
    * on their own and the arm felt springy.
    */
   solve(mj, d, targetPos, targetQuat, {
-    iterations = 4, rotWeight = 0.35, damping = 1e-3, postureWeight = 3e-3, maxStep = 0.3,
+    iterations = IK_PARAMS.iterations, rotWeight = IK_PARAMS.rotWeight, damping = IK_PARAMS.damping, postureWeight = IK_PARAMS.postureWeight, maxStep = IK_PARAMS.maxStep,
   } = {}) {
     const { m, e, J, A, b, qc, qadr, jnt } = this
     for (let it = 0; it < iterations; it++) {

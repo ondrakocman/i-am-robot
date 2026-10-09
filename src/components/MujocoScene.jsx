@@ -4,6 +4,7 @@ import * as THREE from 'three'
 import { makeLabelTexture } from './shippingLabel.js'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { STLLoader } from 'three/examples/jsm/loaders/STLLoader.js'
+import { mergeVertices } from 'three/examples/jsm/utils/BufferGeometryUtils.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
 import { QuaternionSmoother } from '../systems/Smoothing.js'
 import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
@@ -93,13 +94,20 @@ export function MujocoScene() {
         latest.current = data
         lastState.current = { at: performance.now(), info: data.info }
       } else if (data.type === 'ready') {
-        const world = buildWorld(data)
-        setWorld(world)
+        const built = buildWorld(data)
+        setWorld(built)
         setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step · loading robot meshes…`)
-        // the robot's visual meshes are not in the physics model (see scripts/build-g1-mjcf.py): load them here
-        attachRobotVisuals(world, data.scene, baseUrl)
-          .then(() => setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`))
-          .catch(err => fail(`robot meshes: ${err.message}`))
+        // The robot's visual meshes are not in the physics model (see scripts/build-g1-mjcf.py): load them
+        // here. Until they are in, no operator input reaches the worker, so no episode can start with an
+        // invisible robot.
+        saves.current.loading = 'LOADING ROBOT MESHES…'
+        attachRobotVisuals(built, data.scene, baseUrl)
+          .then(() => { saves.current.loading = null; setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`) })
+          .catch(err => {
+            console.error('[meshes]', err)
+            saves.current.error = 'ROBOT MESHES FAILED — reload the page'
+            setStatusText(`Robot meshes failed to load: ${err.message}`)
+          })
       } else if (data.type === 'episode') {
         saveEpisode(data.header, data.data)
           .catch(err => console.error('[episodes] save failed, kept in memory for download', err))
@@ -155,7 +163,7 @@ export function MujocoScene() {
     if (world) world.headMeshes.forEach(m => { m.visible = !hideHead })
   }, [world])
 
-  function readXR(xrFrame, delta, world) {
+  function readXR(xrFrame, delta, w) {
     const session = gl.xr.getSession()
     const refSpace = gl.xr.getReferenceSpace()
     if (!session || !refSpace) return
@@ -191,14 +199,15 @@ export function MujocoScene() {
     _headPos.set(hp.x, hp.y, hp.z)
     _headQuat.set(hq.x, hq.y, hq.z, hq.w)
     if (!st.calibrated) {
-      _eye.fromArray(world.eye)
-      calibrate(_headPos, _headQuat, worldRef.current, world.root, _eye)
+      _eye.fromArray(w.eye)
+      calibrate(_headPos, _headQuat, worldRef.current, w.root, _eye)
       st.calibrated = true
     }
 
     const { input: inp, raw } = input.current
-    readOperator(xrFrame, session, refSpace, world, st.hands, delta, inp, raw)
+    readOperator(xrFrame, session, refSpace, w, st.hands, delta, inp, raw)
     saves.current.xrError = null
+    if (saves.current.loading) return // robot not visible yet: the worker sees no hands and stays idle
     workerRef.current?.postMessage({ type: 'input', input: inp, raw })
   }
 
@@ -440,11 +449,21 @@ async function attachRobotVisuals(world, scene, baseUrl) {
   const res = await fetch(`${baseUrl}models/meshes/visual.json`)
   if (!res.ok) throw new Error(`visual.json: ${res.status}`)
   const { geoms } = await res.json()
+  const hideHead = new URLSearchParams(location.search).get('view') === 'eye' // ?view=eye: a head-mounted view must not see the head
   const loader = new STLLoader()
   const geometries = new Map()
   const bodyIndex = new Map(scene.bodies.map((b, i) => [b.name, i]))
   await Promise.all(geoms.map(async g => {
-    if (!geometries.has(g.file)) geometries.set(g.file, loader.loadAsync(`${baseUrl}models/meshes/${g.file}`))
+    if (!geometries.has(g.file)) {
+      geometries.set(g.file, loader.loadAsync(`${baseUrl}models/meshes/${g.file}`).then(soup => {
+        // STL is a triangle soup (three vertices per face, 1.9M for the robot); the materials are flat-shaded
+        // and never read vertex normals, so share the vertices (315k) and drop the normals
+        soup.deleteAttribute('normal')
+        const shared = mergeVertices(soup)
+        soup.dispose()
+        return shared
+      }))
+    }
     const geometry = await geometries.get(g.file)
     const body = bodyIndex.get(g.body)
     if (body === undefined) throw new Error(`visual.json names unknown body ${g.body}`)
@@ -452,7 +471,7 @@ async function attachRobotVisuals(world, scene, baseUrl) {
     mesh.position.fromArray(g.pos)
     mesh.quaternion.set(g.quat[1], g.quat[2], g.quat[3], g.quat[0])
     mesh.castShadow = SHADOW_CASTER_BODY.test(g.body) // one shadow pass: forearms and hands cast, the robot never receives
-    if (g.mesh === 'head_link') { mesh.visible = world.headMeshes[0]?.visible ?? true; world.headMeshes.push(mesh) }
+    if (g.mesh === 'head_link') { mesh.visible = !hideHead; world.headMeshes.push(mesh) }
     world.bodies[body].add(mesh)
   }))
 }
@@ -538,6 +557,7 @@ function makeHud(title) {
     const now = performance.now()
     if (now - lastDraw < 1000 / HUD_HZ) return
     const [label, color] = saves.error ? [saves.error, '#ff5d5d']
+      : saves.loading ? [saves.loading, '#9fb4c8']
       : saves.stalled ? ['PHYSICS NOT RESPONDING', '#ff5d5d']
       : saves.xrError ? ['TRACKING ERROR', '#ffb35d']
       : STATUS_TEXT[info.status] ?? [info.status.toUpperCase(), '#ffffff']

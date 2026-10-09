@@ -20,7 +20,8 @@ import { TASKS, getTask } from '../src/sim/tasks/index.js'
 import { applyPhysics, compiledPhysics, replayEpisode } from '../src/sim/replay.js'
 import { encodeEpisode } from '../src/sim/episode.js'
 import { mat2quat } from '../src/sim/ik.js'
-import { MUJOCO_VERSION, readPublic as readFile } from './lib.mjs'
+import path from 'node:path'
+import { MUJOCO_VERSION, PUBLIC, readPublic as readFile } from './lib.mjs'
 
 const MAX_PENETRATION = 0.002 // m: contact softness allows ~1 mm at rest; anything deeper is a bad reset
 const SOLVE_AT_S = 2
@@ -63,9 +64,9 @@ for (const task of tasks) {
   // every teleport a task performs mid-episode (spawns, solved placement) must land in a valid state
   let worstTeleport = 0
   const teleport = sim.teleportObject.bind(sim)
-  sim.teleportObject = (...args) => { teleport(...args); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
+  sim.teleportObject = (...a) => { teleport(...a); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
   const teleportSoft = sim.teleportSoft.bind(sim)
-  sim.teleportSoft = (...args) => { teleportSoft(...args); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
+  sim.teleportSoft = (...a) => { teleportSoft(...a); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
   const t0 = performance.now()
   let steps = 0
   let solvedFor = 0
@@ -181,6 +182,18 @@ for (const task of tasks) {
     else if (h.outcome !== expect.outcome || (expect.result && !expect.result(h.result))) fail(`failure case ended as ${h.outcome} ${JSON.stringify(h.result)}, expected ${expect.outcome}`)
     else console.log(`failure case: episode ended as '${h.outcome}' as promised`)
     probe.dispose()
+  }
+
+  // 5c. the renderer's mesh manifest must name bodies of this model and files that exist
+  {
+    const manifest = JSON.parse(await fs.readFile(path.join(PUBLIC, 'models/meshes/visual.json'), 'utf8'))
+    const missing = []
+    for (const g of manifest.geoms) {
+      if (mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY.value, g.body) < 0) missing.push(`body ${g.body}`)
+      if (!(await fs.stat(path.join(PUBLIC, 'models/meshes', g.file)).catch(() => null))) missing.push(`file ${g.file}`)
+    }
+    if (missing.length) fail(`visual.json refers to ${[...new Set(missing)].join(', ')}`)
+    else console.log(`visual manifest: ${manifest.geoms.length} meshes on bodies of this model`)
   }
 
   // 6. rendered geoms (group <= 2, as sim.worker.js describes the scene) must carry a material

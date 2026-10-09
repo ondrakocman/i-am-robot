@@ -23,7 +23,7 @@
 //   parcels (soft.js) the task places with placeSoft/teleportSoft and reads with softPos/softUp/softSpeed;
 //   randomizeSoft?(rng) -> per-body physics; their particle positions are recorded per frame and replayed.
 
-import { ArmIK, ARM_JOINTS } from './ik.js'
+import { ArmIK, ARM_JOINTS, IK_PARAMS } from './ik.js'
 import { EpisodeRecorder, EPISODE_FORMAT } from './episode.js'
 import { writeHandInput } from './autopilot.js'
 import { applyPhysics, compiledPhysics } from './replay.js'
@@ -58,8 +58,7 @@ const READY = {
   shoulder_pitch: 0.3, shoulder_roll: 0.3, shoulder_yaw: 0, elbow: -0.8,
   wrist_roll: 0, wrist_pitch: 0, wrist_yaw: 0,
 }
-// IK rest posture, approached in the null space of the palm task (so it never moves the palm): elbow down
-// and slightly out
+// IK redundancy bias: elbow down and slightly out (a regularizer in the solve, see ik.js)
 const POSTURE = {
   shoulder_pitch: 0, shoulder_roll: 0.3, shoulder_yaw: 0, elbow: 0,
   wrist_roll: 0, wrist_pitch: 0, wrist_yaw: 0,
@@ -569,6 +568,7 @@ export class TaskSim {
         realtime_factor: this.rtf.n ? { min: this.rtf.min, mean: this.rtf.sum / this.rtf.n } : null,
         mujoco_warnings: Object.fromEntries(this.warningNames.map((n, i) => [n, this.warnings[i]])),
         flags,
+        ik: IK_PARAMS, // which arm solver produced the actions (the format version does not say)
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
         soft_bodies: this.soft ? this.soft.header() : undefined,

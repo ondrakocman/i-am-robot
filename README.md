@@ -37,9 +37,9 @@ Pick the task on the landing page (or `?task=`):
 
 Static tasks succeed when the goal holds with every object at rest and both hands off them for 0.5 s; the
 conveyor task ends once every package has been scored (delivered or dropped), `success` only if all were
-label-up. Episodes also end on a drop, a timeout, 5 s without tracked hands (`lost_tracking`), leaving VR
-(`aborted`), a headset recenter (`recentered`), or a MuJoCo instability (`unstable`, keeping the frames recorded
-before it). Then the episode is saved and the scene re-randomizes (object placement, mass, friction, belt
+label-up. Episodes also end on a drop, a timeout, 5 s without tracked hands (`lost_tracking`), leaving VR or
+holding a hand on the reset button (`aborted`), a headset recenter (`recentered`), a MuJoCo instability
+(`unstable`, keeping the frames recorded before it), or a physics-worker exception (`error`). Then the episode is saved and the scene re-randomizes (object placement, mass, friction, belt
 speed), all logged.
 
 Adding a task: one module in `src/sim/tasks/` (scene XML, object list, `reset`/`randomize`, `goal` or `update`,
@@ -77,8 +77,11 @@ counters and `flags` (`fast_motion` above 6 rad/s, `slow_physics` if the headset
 and MuJoCo version. Episodes are numbered per session; `session` + `episode` is the unique key.
 
 Replay: `initial_qpos` + `initial_ctrl` + `physics` + actions + events reproduce `qpos`/`qvel` exactly with the
-same `@mujoco/mujoco` build (`src/sim/replay.js` is the reference). A renderer needs only the logged `qpos`, so
-camera images can be produced offline from any viewpoint with any renderer.
+same `@mujoco/mujoco` build and the same model files (`header.assets` holds their hashes; `app_version` is the
+commit to check out; `src/sim/replay.js` is the reference). A renderer needs only the logged `qpos`: body poses
+follow from the scene MJCF, and the robot's visual meshes from `public/models/meshes/visual.json` (the MJCF
+itself carries only collision hulls, so MuJoCo's own viewer shows no robot shell), so camera images can be
+produced offline from any viewpoint with any renderer.
 
 What is collected: robot and object state, your head pose and hand skeleton at 50 Hz, wall-clock start/end
 times, the browser's user-agent string, the headset's display rate and a random session id. Nothing is

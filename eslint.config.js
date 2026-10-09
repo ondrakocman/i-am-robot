@@ -10,6 +10,7 @@ const base = {
   },
   rules: {
     'no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_|^React$' }],
+    'no-shadow': 'error', // a shadowed DOM element once turned a download notice into "Export failed"
   },
 }
 

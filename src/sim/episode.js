@@ -5,7 +5,8 @@
 export const EPISODE_MAGIC = 0x524d4149 // "IAMR" read as little-endian u32
 export const EPISODE_FORMAT = 'iamr-episode-v2'
 // v1 (pre-release builds) has the same binary layout; its headers lack mujoco_warnings, realtime_factor,
-// body_names and raw_layout.hand_joints, and were recorded with an IK that biased the palm 1-3 cm off target
+// body_names, raw_layout.hand_joints and ik. Neither version identifies the arm solver by itself: `ik` (v2)
+// and `app_version` do
 export const READABLE_FORMATS = ['iamr-episode-v1', EPISODE_FORMAT]
 
 /** Validates a decoded header against its data length; throws on anything a reader cannot trust. */

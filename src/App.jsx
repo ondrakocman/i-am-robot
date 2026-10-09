@@ -105,14 +105,14 @@ export default function App() {
     window.addEventListener('beforeunload', onUnload)
     const onDownload = async () => {
       try {
-        const { blob, partial, count } = await exportEpisodes()
+        const { blob, partial, count: exported } = await exportEpisodes()
         const url = URL.createObjectURL(blob)
         const a = document.createElement('a')
         a.href = url
         a.download = `iamr_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
         a.click()
         setTimeout(() => URL.revokeObjectURL(url), 10000)
-        if (partial) count.textContent = `Downloaded ${count} unsaved episode(s) only: the stored ones are locked by another I Am Robot tab. Close it and download again.`
+        if (partial) count.textContent = `Downloaded ${exported} unsaved episode(s) only: the stored ones are locked by another I Am Robot tab. Close it and download again.`
       } catch (err) {
         count.textContent = `Export failed: ${err.message}`
       }

@@ -2,4 +2,5 @@
 # Pinned so regenerated assets match the committed ones.
 -r requirements.txt
 trimesh==4.12.2
+scipy==1.17.1
 coacd==1.0.7

@@ -153,7 +153,7 @@ function tick() {
 function describeScene(m) {
   const name = (type, i) => mj.mj_id2name(m, mj.mjtObj[type].value, i) ?? ''
   const MESH = mj.mjtGeom.mjGEOM_MESH.value
-  const bodies = Array.from({ length: m.nbody }, (_, b) => ({ name: name('mjOBJ_BODY', b), robot: sim.isRobotBody(b) }))
+  const bodyList = Array.from({ length: m.nbody }, (_, b) => ({ name: name('mjOBJ_BODY', b), robot: sim.isRobotBody(b) }))
   const geoms = []
   const meshes = {}
   const transfer = []
@@ -187,5 +187,5 @@ function describeScene(m) {
       mesh,
     })
   }
-  return { scene: { bodies, geoms, meshes }, transfer }
+  return { scene: { bodies: bodyList, geoms, meshes }, transfer }
 }

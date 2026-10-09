@@ -148,10 +148,15 @@ export async function exportEpisodes() {
   return { blob: new Blob(all.map(e => e.data), { type: 'application/octet-stream' }), partial, count: all.length }
 }
 
+/** Deletes every episode. If the database cannot be cleared (blocked by another tab), nothing is dropped. */
 export async function clearEpisodes() {
   await Promise.allSettled([...pending].map(p => p.done)) // a write in flight must not survive Clear
-  unsaved.length = 0
-  stats = { ...stats, unsaved: 0 }
-  try { await run('readwrite', s => s.clear()) } catch (err) { console.error('[episodes] clear failed', err) }
+  try {
+    await run('readwrite', s => s.clear())
+    unsaved.length = 0
+    stats = { ...stats, unsaved: 0 }
+  } catch (err) {
+    console.error('[episodes] clear failed, nothing deleted', err)
+  }
   await refreshStats()
 }
