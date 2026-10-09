@@ -1,6 +1,7 @@
 // Conveyor package handling after Figure's 24-hour logistics demo: packages slide down a chute on the robot's
 // left onto a flat work plate in front of it. The operator turns each one shipping-label up and sets it on the
-// output belt (robot's right), which carries it away. One episode = a fixed number of packages.
+// output belt (robot's right), which carries it away. One episode = a fixed number of packages drawn from a
+// pool of rigid cardboard boxes (MuJoCo bodies) and soft poly-mailer bags (XPBD, see soft.js).
 import { LAYOUT } from './conveyor.layout.js'
 
 const { pool: POOL, beltX: BELT_X, beltTop: BELT_TOP, rollerRadius: ROLLER_R, spawn: SPAWN, chuteNormal: CHUTE_N, plateY: PLATE_Y, exitY: EXIT_Y, outputStartY: OUTPUT_START_Y, sizes: SIZES } = LAYOUT
@@ -8,7 +9,17 @@ const PACKAGES_PER_EPISODE = 5
 const SPAWN_INTERVAL = [5, 9]         // s between packages, once the top of the chute is clear
 const SPAWN_CLEARANCE = 0.25          // m: no other package this close to the spawn point
 const TAG_UP = Math.cos(20 * Math.PI / 180)
-const PARK = i => [-3 - 0.3 * i, 0, 0.05]
+// Soft parcels: half extents of the undeformed bag, lattice cells, mass, label
+const BAGS = {
+  bag0: { half: [0.08, 0.06, 0.022], cells: [6, 4, 2], mass: 0.3, label: { seed: 6 } },
+  bag1: { half: [0.07, 0.05, 0.025], cells: [5, 4, 2], mass: 0.25, label: { seed: 7 } },
+}
+// The package pool: rigid boxes (two of each size) and the bags
+const ITEMS = [
+  ...Array.from({ length: POOL }, (_, i) => ({ kind: 'rigid', id: i, body: i, half: SIZES[Math.floor(i / 2)] })),
+  ...Object.entries(BAGS).map(([name, def], k) => ({ kind: 'soft', id: POOL + k, name, half: def.half })),
+]
+const PARK = id => [-3 - 0.3 * id, 0, 0.05]
 
 // Quaternions (w, x, y, z) putting the body's +z (label) on each world face
 const FACE_UP = [
@@ -36,13 +47,12 @@ function rotate([w, x, y, z], [vx, vy, vz]) {
 }
 
 /**
- * Where a package with this plan (pool body, label face, yaw) appears on the chute: resting on the spawn
- * point of the chute surface, lifted along the surface normal by the rotated box's extent in that direction
- * plus a small gap, so no face starts inside the sheet whatever the orientation.
+ * Where a package (half extents, label face, yaw) appears on the chute: resting on the spawn point of the chute
+ * surface, lifted along the surface normal by the rotated box's extent in that direction plus a small gap, so
+ * no face starts inside the sheet whatever the orientation.
  */
-function spawnPose(plan) {
-  const half = SIZES[Math.floor(plan.body / 2)]
-  const quat = mulQuat([Math.cos(plan.yaw / 2), 0, 0, Math.sin(plan.yaw / 2)], FACE_UP[plan.face])
+function spawnPose(half, face, yaw) {
+  const quat = mulQuat([Math.cos(yaw / 2), 0, 0, Math.sin(yaw / 2)], FACE_UP[face])
   let extent = 0
   for (let i = 0; i < 3; i++) {
     const axis = rotate(quat, [i === 0 ? 1 : 0, i === 1 ? 1 : 0, i === 2 ? 1 : 0])
@@ -52,6 +62,13 @@ function spawnPose(plan) {
   return { pos: [SPAWN[0] + CHUTE_N[0] * lift, SPAWN[1] + CHUTE_N[1] * lift, SPAWN[2] + CHUTE_N[2] * lift], quat }
 }
 
+// Rigid or soft, the task reads and moves a package the same way
+const itemPos = (sim, it) => it.kind === 'soft' ? sim.softPos(it.name) : sim.objectPos(it.body)
+const itemUp = (sim, it) => it.kind === 'soft' ? sim.softUp(it.name) : sim.objectUp(it.body)
+const itemTeleport = (sim, it, pos, quat) => it.kind === 'soft' ? sim.teleportSoft(it.name, pos, quat, true) : sim.teleportObject(it.body, pos, quat)
+const itemPark = (sim, it) => it.kind === 'soft' ? sim.teleportSoft(it.name, PARK(it.id), [1, 0, 0, 0], false) : sim.teleportObject(it.body, PARK(it.id))
+const onBelt = (it, n) => [BELT_X, OUTPUT_START_Y - 0.08 - 0.14 * n, BELT_TOP + it.half[2] + (it.kind === 'soft' ? 0.004 : 0.002)]
+
 const round = (x, p = 3) => Number(x.toFixed(p))
 
 export default {
@@ -60,13 +77,14 @@ export default {
   title: 'Label up, onto the right belt',
   scene: 'mujoco/conveyor.xml',
   objects: Array.from({ length: POOL }, (_, i) => `package${i}`),
+  soft: { bodies: BAGS, belts: ['belt_out_roller'] },
   timeout: 150,
   materials: {
     cardboard: { roughness: 0.95 },
     plate: { roughness: 0.35, metalness: 0.8 }, chute: { roughness: 0.4, metalness: 0.75 },
     roller: { roughness: 0.4, metalness: 0.6 }, rail: { roughness: 0.45, metalness: 0.7 }, leg: { roughness: 0.6, metalness: 0.5 },
   },
-  // each package's label is a printed shipping label (address, barcode, QR code), different per package
+  // each box's label is a printed shipping label (address, barcode, QR code), different per package
   geometry: Object.fromEntries(Array.from({ length: POOL }, (_, i) => [`label${i}`, { shippingLabel: { seed: i } }])),
 
   randomize(rng) {
@@ -76,25 +94,36 @@ export default {
     return params
   },
 
+  // bags: contents weight, film friction, and how squishy (edge compliance, m/N)
+  randomizeSoft(rng) {
+    const u = (lo, hi) => lo + (hi - lo) * rng()
+    const params = {}
+    for (const name of Object.keys(BAGS)) params[name] = { mass: u(0.15, 0.4), friction: u(0.5, 0.9), edgeCompliance: u(1e-3, 4e-3) }
+    return params
+  },
+
   reset(sim, rng) {
     const u = (lo, hi) => lo + (hi - lo) * rng()
-    for (let i = 0; i < POOL; i++) sim.placeObject(i, PARK(i))
+    for (const it of ITEMS) {
+      if (it.kind === 'soft') sim.placeSoft(it.name, PARK(it.id), [1, 0, 0, 0], false)
+      else sim.placeObject(it.body, PARK(it.id))
+    }
     const beltSpeed = u(0.05, 0.09)                     // m/s
     // belt motors: rollers spin about +x; positive carries toward -y (away from the robot's left)
     const { m, d } = sim
     for (let a = 0; a < m.nu; a++) {
       if (sim.name('mjOBJ_ACTUATOR', a).startsWith('belt_')) d.ctrl[a] = Math.fround(beltSpeed / ROLLER_R)
     }
-    // Spawn plan: distinct pool bodies in random order (so the size mix varies between episodes), which face
-    // carries the label, yaw, and the pause before each one is released onto the chute
-    const bodies = Array.from({ length: POOL }, (_, i) => i)
-    for (let i = bodies.length - 1; i > 0; i--) {
+    // Spawn plan: distinct pool items in random order (so the mix of boxes and bags varies between episodes),
+    // which face carries the label, yaw, and the pause before each one is released onto the chute
+    const items = ITEMS.map((_, i) => i)
+    for (let i = items.length - 1; i > 0; i--) {
       const j = Math.floor(rng() * (i + 1));
-      [bodies[i], bodies[j]] = [bodies[j], bodies[i]]
+      [items[i], items[j]] = [items[j], items[i]]
     }
-    const order = bodies.slice(0, PACKAGES_PER_EPISODE).map(body => ({ body, face: Math.floor(rng() * 6), yaw: u(-0.5, 0.5), after: round(u(...SPAWN_INTERVAL), 2) }))
+    const order = items.slice(0, PACKAGES_PER_EPISODE).map(item => ({ item, face: Math.floor(rng() * 6), yaw: u(-0.5, 0.5), after: round(u(...SPAWN_INTERVAL), 2) }))
     sim.taskState = { order, spawned: 0, active: [], delivered: [], nextSpawnAt: 1 }
-    return { beltSpeed, packages: order }
+    return { beltSpeed, packages: order.map(p => ({ kind: ITEMS[p.item].kind, id: ITEMS[p.item].id, face: p.face, yaw: p.yaw, after: p.after })) }
   },
 
   update(sim) {
@@ -103,15 +132,16 @@ export default {
 
     // Release the next package at the top of the chute once it is due and the spawn point is clear
     if (st.spawned < st.order.length && t >= st.nextSpawnAt) {
-      const plan = st.order[st.spawned] // pool bodies in the plan are distinct, so this one is free
+      const plan = st.order[st.spawned] // pool items in the plan are distinct, so this one is free
       const clear = !st.active.some(a => {
-        const [x, y, z] = sim.objectPos(a.body)
+        const [x, y, z] = itemPos(sim, ITEMS[a.item])
         return Math.hypot(x - SPAWN[0], y - SPAWN[1], z - SPAWN[2]) < SPAWN_CLEARANCE
       })
       if (clear) {
-        const { pos, quat } = spawnPose(plan)
-        sim.teleportObject(plan.body, pos, quat)
-        st.active.push({ body: plan.body, index: st.spawned })
+        const it = ITEMS[plan.item]
+        const { pos, quat } = spawnPose(it.half, plan.face, plan.yaw)
+        itemTeleport(sim, it, pos, quat)
+        st.active.push({ item: plan.item, index: st.spawned })
         st.spawned++
         st.nextSpawnAt = t + plan.after
       }
@@ -119,14 +149,15 @@ export default {
 
     // Track packages leaving the output belt or falling
     for (const a of st.active.slice()) {
-      const [, y, z] = sim.objectPos(a.body)
+      const it = ITEMS[a.item]
+      const [, y, z] = itemPos(sim, it)
       let outcome = null
       if (z < 0.5) outcome = 'dropped'
-      else if (y < EXIT_Y) outcome = sim.objectUp(a.body) > TAG_UP ? 'correct' : 'wrong_face'
+      else if (y < EXIT_Y) outcome = itemUp(sim, it) > TAG_UP ? 'correct' : 'wrong_face'
       if (outcome) {
         st.delivered.push({ index: a.index, outcome, time: round(t, 2) })
         st.active.splice(st.active.indexOf(a), 1)
-        sim.teleportObject(a.body, PARK(a.body))
+        itemPark(sim, it)
       }
     }
 
@@ -156,13 +187,16 @@ export default {
     return { packages: st.order.length, delivered: st.delivered, correct: st.delivered.filter(r => r.outcome === 'correct').length }
   },
 
-  // Headless check: every spawn pose the plan can draw (each pool body, face and yaw extreme) must be a valid,
+  // Headless check: every spawn pose the plan can draw (each pool item, face and yaw extreme) must be a valid,
   // non-penetrating state
   spawnPoses() {
     const poses = []
-    for (let body = 0; body < POOL; body++) {
+    for (const it of ITEMS) {
       for (let face = 0; face < 6; face++) {
-        for (const yaw of [-0.5, 0, 0.5]) poses.push({ body, ...spawnPose({ body, face, yaw }) })
+        for (const yaw of [-0.5, 0, 0.5]) {
+          const { pos, quat } = spawnPose(it.half, face, yaw)
+          poses.push(it.kind === 'soft' ? { soft: it.name, pos, quat } : { body: it.body, pos, quat })
+        }
       }
     }
     return poses
@@ -174,9 +208,9 @@ export default {
     const st = sim.taskState
     st.active = []
     st.order.forEach((plan, n) => {
-      const half = SIZES[Math.floor(plan.body / 2)]
-      sim.teleportObject(plan.body, [BELT_X, OUTPUT_START_Y - 0.08 - 0.14 * n, BELT_TOP + half[2] + 0.002], FACE_UP[1])
-      st.active.push({ body: plan.body, index: n })
+      const it = ITEMS[plan.item]
+      itemTeleport(sim, it, onBelt(it, n), FACE_UP[1])
+      st.active.push({ item: plan.item, index: n })
     })
     st.spawned = st.order.length
     return { outcome: 'partial', result: r => r.delivered.every(d => d.outcome === 'wrong_face') }
@@ -187,9 +221,9 @@ export default {
     const st = sim.taskState
     st.active = []
     st.order.forEach((plan, n) => {
-      const half = SIZES[Math.floor(plan.body / 2)]
-      sim.teleportObject(plan.body, [BELT_X, OUTPUT_START_Y - 0.08 - 0.14 * n, BELT_TOP + half[2] + 0.002])
-      st.active.push({ body: plan.body, index: n })
+      const it = ITEMS[plan.item]
+      itemTeleport(sim, it, onBelt(it, n), [1, 0, 0, 0])
+      st.active.push({ item: plan.item, index: n })
     })
     st.spawned = st.order.length
   },

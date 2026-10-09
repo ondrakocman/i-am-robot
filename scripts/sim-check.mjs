@@ -64,6 +64,8 @@ for (const task of tasks) {
   let worstTeleport = 0
   const teleport = sim.teleportObject.bind(sim)
   sim.teleportObject = (...args) => { teleport(...args); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
+  const teleportSoft = sim.teleportSoft.bind(sim)
+  sim.teleportSoft = (...args) => { teleportSoft(...args); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
   const t0 = performance.now()
   let steps = 0
   let solvedFor = 0
@@ -151,12 +153,15 @@ for (const task of tasks) {
   if (task.spawnPoses) {
     const probe = new TaskSim(mj, m, task, { seed: 3 })
     let worstSpawn = 0, bad = null
-    for (const { body, pos, quat } of task.spawnPoses(probe)) {
-      probe.teleportObject(body, pos, quat)
+    for (const pose of task.spawnPoses(probe)) {
+      const { body, soft, pos, quat } = pose
+      if (soft) probe.teleportSoft(soft, pos, quat, true)
+      else probe.teleportObject(body, pos, quat)
       mj.mj_forward(m, probe.d)
       const pen = probe.maxObjectPenetration()
-      if (pen > worstSpawn) { worstSpawn = pen; bad = { body, pos, quat } }
-      probe.placeObject(body, [-3 - 0.3 * body, 0, 0.05])
+      if (pen > worstSpawn) { worstSpawn = pen; bad = pose }
+      if (soft) probe.placeSoft(soft, [-3, 0, 0.05], [1, 0, 0, 0], false)
+      else probe.placeObject(body, [-3 - 0.3 * body, 0, 0.05])
     }
     if (worstSpawn > MAX_PENETRATION) fail(`spawn pose ${JSON.stringify(bad)} starts ${(worstSpawn * 1000).toFixed(1)} mm inside something`)
     else console.log(`spawn check: ${task.spawnPoses(probe).length} poses, deepest penetration ${(worstSpawn * 1000).toFixed(2)} mm`)

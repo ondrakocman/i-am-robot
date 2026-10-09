@@ -22,6 +22,9 @@ Each episode is a dict with the JSON header under 'header' and one read-only flo
   raw       viewer (head) pose (pos 3 + quat wxyz 4) then 25 WebXR joints per hand (pos 3 + quat wxyz 4), all
             in the robot frame, joint order in header['raw_layout']['hand_joints']; an untracked joint is all zeros
   touching  per hand: 1 while it touches any task object
+  soft      (tasks with soft parcels) particle positions x,y,z of every soft body, in header['soft_bodies']
+            order (name, particle count, lattice half extents/cells, per-episode mass/friction/compliance);
+            the surface triangles follow from the lattice (src/sim/soft.js softLattice)
 The header also carries the layout, randomized physics, logged teleport events, initial/final state, asset
 hashes and the app/engine versions needed to replay the episode exactly (see src/sim/replay.js).
 """

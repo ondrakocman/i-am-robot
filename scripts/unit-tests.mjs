@@ -8,6 +8,7 @@ import { retargetHand, RetargetingFilter } from '../src/systems/HandRetargeting.
 import { smoothingAlpha, QuaternionSmoother } from '../src/systems/Smoothing.js'
 import { OneEuroVector3 } from '../src/systems/OneEuroFilter.js'
 import { encodeEpisode, decodeEpisodes, EpisodeRecorder, EPISODE_FORMAT } from '../src/sim/episode.js'
+import { softLattice } from '../src/sim/soft.js'
 
 const close = (a, b, eps = 1e-6) => assert.ok(a.distanceTo(b) < eps, `${a.toArray()} != ${b.toArray()}`)
 const v = (x, y, z) => new THREE.Vector3(x, y, z)
@@ -71,6 +72,28 @@ test('filters: time-constant smoothing is independent of the frame rate', () => 
   e.update(v(0, 0, 0), 1 / 90)
   for (let i = 0; i < 90; i++) e.update(v(1, 0, 0), 1 / 90)
   assert.ok(e.value.x > 0.95)
+})
+
+test('soft lattice: positive tetrahedra, every tet edge once, outward surface with the top face last', () => {
+  const half = [0.08, 0.06, 0.022], cells = [6, 4, 2]
+  const L = softLattice({ half, cells })
+  assert.equal(L.n, 7 * 5 * 3)
+  assert.equal(L.restVol.length, 5 * 6 * 4 * 2)
+  assert.ok(L.restVol.every(v => v > 0), 'tet volumes positive')
+  assert.ok(Math.abs(L.restVol.reduce((a, b) => a + b, 0) - 8 * half[0] * half[1] * half[2]) < 1e-9, 'tets fill the box')
+  assert.ok(L.restLen.every(l => l > 0.01))
+  const faces = 2 * (cells[0] * cells[1] + cells[0] * cells[2] + cells[1] * cells[2])
+  assert.equal(L.surface.length, 3 * 2 * faces)
+  assert.equal(L.topCount, 3 * 2 * cells[0] * cells[1])
+  // every surface triangle faces away from the (centred) box
+  for (let t = 0; t < L.surface.length; t += 3) {
+    const [a, b, c] = [L.surface[t], L.surface[t + 1], L.surface[t + 2]].map(i => L.rest.subarray(3 * i, 3 * i + 3))
+    const u = [b[0] - a[0], b[1] - a[1], b[2] - a[2]], w = [c[0] - a[0], c[1] - a[1], c[2] - a[2]]
+    const n = [u[1] * w[2] - u[2] * w[1], u[2] * w[0] - u[0] * w[2], u[0] * w[1] - u[1] * w[0]]
+    const centroid = [(a[0] + b[0] + c[0]) / 3, (a[1] + b[1] + c[1]) / 3, (a[2] + b[2] + c[2]) / 3]
+    assert.ok(n[0] * centroid[0] + n[1] * centroid[1] + n[2] * centroid[2] > 0, 'outward winding')
+    if (t >= L.topStart) assert.ok(centroid[2] > half[2] - 1e-9, 'top face last')
+  }
 })
 
 test('episode file: encode -> decode round trip and corruption detection', () => {

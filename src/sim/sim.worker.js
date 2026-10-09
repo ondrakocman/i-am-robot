@@ -76,6 +76,7 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
       resetButton: COMMON.resetButton, materials: task.materials ?? {}, geometry: task.geometry ?? {},
     },
     timestep: sim.dt,
+    soft: sim.soft ? sim.soft.describe() : [],
   }, transfer)
   lastTick = perf.windowStart = performance.now()
   const interval = setInterval(() => {
@@ -128,9 +129,11 @@ function tick() {
     lastPost = now
     const out = sim.writeBodies(bodies ?? new Float32Array(7 * sim.m.nbody))
     bodies = null
+    const soft = sim.soft ? sim.soft.gather(new Float32Array(3 * sim.soft.total)) : null
     self.postMessage({
       type: 'state',
       bodies: out,
+      soft,
       info: {
         status: sim.status,
         episode: sim.episode,
@@ -141,7 +144,7 @@ function tick() {
         rtf: perf.rtf,
         msPerStep: perf.msPerStep,
       },
-    }, [out.buffer])
+    }, soft ? [out.buffer, soft.buffer] : [out.buffer])
   }
 }
 

@@ -2,6 +2,7 @@
 // must reproduce the logged qpos/qvel bit-for-bit with the same MuJoCo build. Used by TaskSim (physics
 // randomization), scripts/sim-check.mjs and scripts/replay.mjs; also the specification of how a downstream
 // renderer should step an episode.
+import { SoftWorld } from './soft.js'
 
 /**
  * Snapshot of the compiled mass/inertia/friction, taken on a freshly loaded model. Randomized physics scales
@@ -51,6 +52,14 @@ export function* replayFrames(mj, m, header, frames) {
   const d = new mj.MjData(m)
   d.qpos.set(header.initial_qpos)
   d.ctrl.set(header.initial_ctrl ?? [])
+  // soft parcels: rebuilt from the header and stepped in lockstep, their logged positions compared too
+  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { half: b.half, cells: b.cells }])), { belts: header.soft_belts ?? [] }) : null
+  if (soft) {
+    soft.setPhysics(header.soft_physics ?? {})
+    soft.scatter(Float64Array.from(header.initial_soft))
+    soft.bodies.forEach((b, k) => { b.active = !!header.initial_soft_active?.[k] })
+  }
+  const softBuf = soft ? new Float64Array(3 * soft.total) : null
   const q32 = new Float32Array(header.nq)
   const v32 = new Float32Array(header.nv)
   let ev = 0
@@ -62,16 +71,24 @@ export function* replayFrames(mj, m, header, frames) {
       v32.set(d.qvel)
       for (let k = 0; k < header.nq; k++) if (q32[k] !== frames[o + field.qpos.offset + k]) return i
       for (let k = 0; k < header.nv; k++) if (v32[k] !== frames[o + field.qvel.offset + k]) return i
+      if (soft) {
+        soft.gather(softBuf)
+        for (let k = 0; k < softBuf.length; k++) if (Math.fround(softBuf[k]) !== frames[o + field.soft.offset + k]) return i
+      }
       mj.mj_kinematics(m, d) // d.xpos/xquat still described the previous substep
-      yield { i, d }
+      yield { i, d, soft }
       // Logged teleports (spawns) come after the frame they are tagged with, before the steps to the next one
       for (; ev < header.events.length && header.events[ev].tick === i; ev++) {
         const e = header.events[ev]
+        if (e.soft) { soft.byName[e.soft].place(e.pos, e.quat, e.active); continue }
         d.qpos.set(e.qpos, e.qpos_adr)
         d.qvel.fill(0, e.qvel_adr, e.qvel_adr + 6)
       }
       for (let a = 0; a < header.nu; a++) d.ctrl[a] = frames[o + field.action.offset + a]
-      for (let s = 0; s < header.steps_per_control; s++) mj.mj_step(m, d)
+      for (let s = 0; s < header.steps_per_control; s++) {
+        if (soft) soft.step(d)
+        mj.mj_step(m, d)
+      }
     }
     return -1
   } finally {

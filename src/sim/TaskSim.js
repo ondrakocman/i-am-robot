@@ -19,12 +19,16 @@
 //   never in update(), or replay from the log would silently differ.
 //   An event's `tick` is the index of the last frame recorded before the teleport: replay applies it after
 //   comparing that frame and before stepping on to the next (see replay.js).
+//   soft?: { bodies: { [name]: { half, cells, mass?, ... } }, belts?: [geom prefixes] } declares XPBD soft
+//   parcels (soft.js) the task places with placeSoft/teleportSoft and reads with softPos/softUp/softSpeed;
+//   randomizeSoft?(rng) -> per-body physics; their particle positions are recorded per frame and replayed.
 
 import { ArmIK, ARM_JOINTS } from './ik.js'
 import { EpisodeRecorder, EPISODE_FORMAT } from './episode.js'
 import { writeHandInput } from './autopilot.js'
 import { applyPhysics, compiledPhysics } from './replay.js'
 import { SIDES, HAND_INPUT, INPUT_SIZE, INPUT_NAMES, RAW_SIZE, RAW_LAYOUT, handOfBodyName } from './inputLayout.js'
+import { SoftWorld } from './soft.js'
 
 export { SIDES, HAND_INPUT, INPUT_SIZE, INPUT_NAMES, RAW_SIZE, RAW_LAYOUT }
 export const CONTROL_HZ = 50
@@ -198,6 +202,9 @@ export class TaskSim {
     this.input = new Float32Array(INPUT_SIZE)
     this.raw = new Float32Array(RAW_SIZE)
     this.autoInput = new Float32Array(INPUT_SIZE)
+    // Soft parcels (XPBD, soft.js), stepped in lockstep with MuJoCo and recorded per frame
+    this.soft = task.soft ? new SoftWorld(mj, m, task.soft.bodies, { handOfBody: this.handOfBody, belts: task.soft.belts ?? [] }) : null
+    this.softBuf = new Float64Array(this.soft ? 3 * this.soft.total : 0)
     this.recorder = new EpisodeRecorder([
       { name: 'time', size: 1 },
       { name: 'action', size: m.nu },
@@ -206,6 +213,7 @@ export class TaskSim {
       { name: 'input', size: INPUT_SIZE },
       { name: 'raw', size: RAW_SIZE },
       { name: 'touching', size: 2 },
+      ...(this.soft ? [{ name: 'soft', size: 3 * this.soft.total }] : []),
     ], Math.ceil((task.timeout + 1) * CONTROL_HZ)) // preallocated: no buffer growth inside the physics loop
     this.rtf = { min: Infinity, sum: 0, n: 0 } // real-time factor samples supplied by the host while running
     this.warnings = new Int32Array(this.warningNames.length)
@@ -256,6 +264,8 @@ export class TaskSim {
     mj.mj_resetData(m, d)
     // mj_setConst (inside setPhysics) rewrites qpos to the model default, so it must run before posing anything
     this.setPhysics(task.randomize ? task.randomize(rng) : {})
+    this.softPhysics = this.soft && task.randomizeSoft ? task.randomizeSoft(rng) : {}
+    if (this.soft) this.soft.setPhysics(this.softPhysics)
     for (const arm of this.arms) {
       for (let k = 0; k < arm.qCmd.length; k++) {
         arm.qCmd[k] = arm.ready[k]
@@ -271,6 +281,8 @@ export class TaskSim {
 
     this.initialQpos = Array.from(d.qpos)
     this.initialCtrl = Array.from(d.ctrl)
+    this.initialSoft = this.soft ? Array.from(this.soft.gather(this.softBuf)) : undefined
+    this.initialSoftActive = this.soft ? this.soft.bodies.map(b => b.active) : undefined
     this.events = []
     this.scheduled = []
     this.frameIndex = 0
@@ -335,6 +347,23 @@ export class TaskSim {
   /** Runs fn right after frame `tick` is recorded, so any teleport it does lands on a frame boundary. */
   scheduleAtFrame(tick, fn) { this.scheduled.push({ tick, fn }) }
 
+  // ── Soft parcels ──────────────────────────────────────────────────────────
+
+  /** Places a soft body undeformed (reset-time; inactive = parked and not simulated). */
+  placeSoft(name, pos, quat = [1, 0, 0, 0], active = false) {
+    this.soft.byName[name].place(pos, quat, active)
+  }
+
+  /** Teleports a soft body mid-episode and logs it so replay can re-apply it. */
+  teleportSoft(name, pos, quat = [1, 0, 0, 0], active = true) {
+    this.soft.byName[name].place(pos, quat, active)
+    if (this.status === 'running') this.events.push({ tick: this.frameIndex - 1, soft: name, pos: [...pos], quat: [...quat], active })
+  }
+
+  softPos(name) { return this.soft.byName[name].centroid() }
+  softUp(name) { return this.soft.byName[name].up() }
+  softSpeed(name) { return this.soft.byName[name].speed() }
+
   /** Teleports an object mid-episode (spawning / despawning) and logs it so replay can re-apply it. */
   teleportObject(i, pos, quat = [1, 0, 0, 0]) {
     const obj = this.objects[i]
@@ -349,7 +378,7 @@ export class TaskSim {
    */
   maxObjectPenetration() {
     const contacts = this.d.contact
-    let worst = 0
+    let worst = this.soft ? this.soft.measurePenetration(this.d) : 0
     for (let i = 0, n = contacts.size(); i < n; i++) {
       const c = contacts.get(i)
       if ((this.objectOfGeom[c.geom1] >= 0 || this.objectOfGeom[c.geom2] >= 0) && c.dist < 0) worst = Math.max(worst, -c.dist)
@@ -375,6 +404,7 @@ export class TaskSim {
   step() {
     if (this.steps % this.stepsPerControl === 0) this.control()
     if (this.status === 'waiting') return false
+    if (this.soft) this.soft.step(this.d) // leaves the parcels' reaction forces in xfrc_applied for this step
     this.mj.mj_step(this.m, this.d)
     this.steps++
     return true
@@ -413,11 +443,14 @@ export class TaskSim {
     }
 
     this.scanContacts()
+    if (this.soft) { this.touching[0] |= this.soft.touching[0]; this.touching[1] |= this.soft.touching[1] }
     if (this.status === 'running') {
       // A MuJoCo warning during the last steps means the state is reset/corrupt: end before recording it
-      if (this.readWarnings()) { this.endEpisode('unstable'); return }
+      if (this.readWarnings() || (this.soft && !this.soft.finite())) { this.endEpisode('unstable'); return }
       for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
-      this.recorder.push([this.frameIndex * this.controlDt, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
+      const frame = [this.frameIndex * this.controlDt, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching]
+      if (this.soft) frame.push(this.soft.gather(this.softBuf))
+      this.recorder.push(frame)
       this.lastQpos.set(d.qpos)
       this.lastQvel.set(d.qvel)
       this.frameIndex++
@@ -538,6 +571,11 @@ export class TaskSim {
         flags,
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
+        soft_bodies: this.soft ? this.soft.header() : undefined,
+        soft_belts: this.soft ? (task.soft.belts ?? []) : undefined,
+        soft_physics: this.soft ? this.softPhysics : undefined,
+        initial_soft: this.initialSoft,
+        initial_soft_active: this.initialSoftActive,
         // state at the last recorded control tick (teleports done by the task in that tick are not included)
         final_qpos: Array.from(this.lastQpos),
         final_qvel: Array.from(this.lastQvel),

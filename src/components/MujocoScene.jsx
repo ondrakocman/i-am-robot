@@ -22,6 +22,8 @@ const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x9c9fa3, roughness: 0.42, metalness: 0.7, flatShading: true })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3, flatShading: true })
 const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0, flatShading: true })
+// poly-mailer bag: light grey plastic film
+const MAT_BAG = new THREE.MeshStandardMaterial({ color: 0xd4d7da, roughness: 0.38, metalness: 0.05 })
 const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
 const DARK_MESH = /^(head_link|logo_link)$|_hand_palm_link$/   // palm mesh hangs off the (silver) wrist body
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
@@ -207,6 +209,7 @@ export function MujocoScene() {
       latest.current = null
       saves.current.stalled = false
       applyBodies(world, s.bodies)
+      if (s.soft) applySoft(world, s.soft)
       workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies }, [s.bodies.buffer])
       applyInfo(world, s.info, saves.current)
     } else if (lastState.current.info && performance.now() - lastState.current.at > STALL_MS) {
@@ -238,7 +241,7 @@ export function MujocoScene() {
 
 // ── Scene construction ──────────────────────────────────────────────────────
 
-function buildWorld({ scene, eye, task, palmOffset }) {
+function buildWorld({ scene, eye, task, palmOffset, soft = [] }) {
   const root = new THREE.Group()
   root.quaternion.copy(ROBOT_BASE_QUAT)
 
@@ -264,7 +267,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
     const override = task.geometry[geom.name]
     if (override?.shippingLabel) {
       // a printed label on the box face: paper-thin plane with a generated texture, drawn over the cardboard
-      material = new THREE.MeshStandardMaterial({ map: makeLabelTexture(override.shippingLabel.seed), roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 })
+      material = makeLabelMaterial(override.shippingLabel.seed)
     } else if (!isRobot) {
       const key = geom.material + '|' + geom.rgba.join(',') + (geom.mesh >= 0 ? '|flat' : '')
       if (!materialCache.has(key)) {
@@ -328,6 +331,22 @@ function buildWorld({ scene, eye, task, palmOffset }) {
   const wristBodies = ['left', 'right'].map(side => bodies[scene.bodies.findIndex(b => b.name === `${side}_wrist_yaw_link`)])
   const palmOffsets = palmOffset.map(p => new THREE.Vector3().fromArray(p))
 
+  // soft parcels: one deformable mesh each, label texture on the top face
+  const softMeshes = soft.map(def => {
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(new Float32Array(3 * def.n), 3))
+    geometry.setAttribute('uv', new THREE.BufferAttribute(def.uv, 2))
+    geometry.setIndex(new THREE.BufferAttribute(def.surface, 1))
+    geometry.addGroup(0, def.topStart, 0)
+    geometry.addGroup(def.topStart, def.topCount, 1)
+    const mesh = new THREE.Mesh(geometry, [MAT_BAG, def.label ? makeLabelMaterial(def.label.seed) : MAT_BAG])
+    mesh.frustumCulled = false
+    mesh.castShadow = true
+    mesh.visible = false // until the first state arrives
+    root.add(mesh)
+    return { mesh, n: def.n }
+  })
+
   const hud = makeHud(task.title)
   hud.mesh.position.set(0.8, 0, 1.04)
   hud.mesh.quaternion.copy(FACING_ROBOT)
@@ -337,7 +356,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
   reset.group.position.fromArray(task.resetButton)
   root.add(reset.group)
 
-  return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies, palmOffsets }
+  return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies, palmOffsets, softMeshes }
 }
 
 function geomGeometry(g, meshes, cache, override) {
@@ -372,6 +391,19 @@ function geomGeometry(g, meshes, cache, override) {
   }
 }
 
+// Soft parcel particle positions from the worker (world frame): parked bodies (far below the floor) are hidden
+function applySoft(world, positions) {
+  let o = 0
+  for (const { mesh, n } of world.softMeshes) {
+    const attr = mesh.geometry.attributes.position
+    attr.array.set(positions.subarray(o, o + 3 * n))
+    attr.needsUpdate = true
+    mesh.visible = positions[o + 2] > 0
+    if (mesh.visible) mesh.geometry.computeVertexNormals()
+    o += 3 * n
+  }
+}
+
 function applyBodies(world, b) {
   for (let i = 0; i < world.bodies.length; i++) {
     const o = 7 * i
@@ -387,6 +419,11 @@ function applyInfo(world, info, saves) {
   }
   world.reset.setProgress(info.resetProgress)
   world.hud.draw(info, saves)
+}
+
+// A printed label: paper-thin, drawn over the surface it sits on
+function makeLabelMaterial(seed) {
+  return new THREE.MeshStandardMaterial({ map: makeLabelTexture(seed), roughness: 0.8, polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -2 })
 }
 
 // ── Robot visual meshes: full-resolution STL files the physics model does not carry ─────────────────
