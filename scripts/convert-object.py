@@ -38,8 +38,11 @@ mesh.export(out / 'visual.stl')
 coacd.set_log_level('error')
 parts = coacd.run_coacd(coacd.Mesh(mesh.vertices, mesh.faces), threshold=args.threshold, max_convex_hull=args.pieces,
                         resolution=2000, mcts_nodes=20, mcts_iterations=150, mcts_max_depth=3, merge=True, seed=1)
-for i, (v, f) in enumerate(parts):
-    trimesh.Trimesh(v, f).export(out / f'c{i}.stl')
+# CoACD returns the hulls in a run-dependent order (and their exact shape can vary slightly between machines):
+# order them canonically so re-runs change as little as possible
+hulls = sorted((trimesh.Trimesh(v, f) for v, f in parts), key=lambda h: (-round(h.volume, 9), *np.round(h.centroid, 6)))
+for i, hull in enumerate(hulls):
+    hull.export(out / f'c{i}.stl')
 
 print(f'{args.name}: {len(mesh.faces)} faces, size {size[0]:.3f} x {size[1]:.3f} x {size[2]:.3f} m, {len(parts)} convex pieces')
 print('\nMJCF (paths are relative to public/models; loadScene serves them under the robot meshdir):')

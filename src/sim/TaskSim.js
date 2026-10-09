@@ -11,7 +11,8 @@
 //     update(sim) -> outcome | null     (dynamic tasks: called every control tick, runs its own spawning/scoring and
 //                                        returns 'success' / 'partial' / ... to end the episode)
 //   plus optional hud(sim) -> string for the panel, result(sim) -> per-episode scoring for the header,
-//   autopilot?(sim, t) -> per-hand grip targets, solved?(sim) for the headless check.
+//   autopilot?(sim, t) -> per-hand grip targets, solved?(sim) and reachTargets?(sim) for the headless check,
+//   materials (MuJoCo material name -> three.js look) and geometry (geom name -> custom visual) for the renderer.
 //   Per-episode task state belongs in `sim.taskState` (set in reset), never on the module object.
 //   Teleports done by a task while running must go through sim.teleportObject so replay can re-apply them.
 //   update() runs after the frame's action was recorded: a task must only write ctrl in reset() (belt motors),
@@ -22,6 +23,7 @@
 import { ArmIK, ARM_JOINTS } from './ik.js'
 import { EpisodeRecorder, EPISODE_FORMAT } from './episode.js'
 import { writeHandInput } from './autopilot.js'
+import { applyPhysics, compiledPhysics } from './replay.js'
 
 export const CONTROL_HZ = 50
 export const SIDES = ['left', 'right']
@@ -32,12 +34,16 @@ export const TIMESTEPS = [0.001, 0.002, 0.0025, 0.004, 0.005]
 // Per-hand operator input: tracked, palm position (3), palm quaternion w,x,y,z (4), finger commands (7):
 // thumb rotation in [-1, 1], then curls in [0, 1] for thumb_1, thumb_2, index_0, index_1, middle_0, middle_1.
 // Positions/orientations are in the MuJoCo world frame (x forward, y left, z up).
-export const HAND_INPUT = 15
+const HAND_INPUT_NAMES = ['tracked', 'palm_x', 'palm_y', 'palm_z', 'palm_qw', 'palm_qx', 'palm_qy', 'palm_qz',
+  'thumb_rotation', 'thumb_1', 'thumb_2', 'index_0', 'index_1', 'middle_0', 'middle_1']
+export const HAND_INPUT = HAND_INPUT_NAMES.length
 export const INPUT_SIZE = 2 * HAND_INPUT
+export const INPUT_NAMES = SIDES.flatMap(s => HAND_INPUT_NAMES.map(n => `${s}_${n}`))
 // Raw operator data, recorded for re-retargeting later: viewer (head) pose (pos 3 + quat wxyz 4), then for
 // each hand the 25 WebXR joints (pos 3 + quat wxyz 4), all in the MuJoCo world frame. An untracked joint is
 // all zeros (its quaternion has zero norm).
 export const RAW_SIZE = 7 + 2 * 25 * 7
+export const RAW_LAYOUT = { pose: ['x', 'y', 'z', 'qw', 'qx', 'qy', 'qz'], order: ['head', ...SIDES.map(s => `${s}_hand (25 WebXR joints)`)] }
 
 // Shared across tasks
 export const COMMON = {
@@ -71,9 +77,13 @@ const ARM_SPEED = [3, 3, 3, 3, 5, 5, 5]
 // is blocked by contact the target stops running ahead, so the motor pushes with a bounded force and the
 // arm doesn't whip when it comes free. With kp=80 this caps the extra torque at ~10 Nm (wrist kp=40: ~5 Nm).
 const ARM_LEAD = 0.12
-// MuJoCo warning slots (mjtWarning order). bad_qpos/bad_qvel/bad_qacc mean MuJoCo found an invalid state and
-// reset the data; the others (constraint/contact buffer overflow, bad inertia or ctrl) corrupt the step.
-const WARNINGS = ['inertia', 'contact_full', 'constraint_full', 'bad_qpos', 'bad_qvel', 'bad_qacc', 'bad_ctrl']
+// MuJoCo warning names in mjtWarning order, from the loaded build (the enum has changed between releases).
+// bad_qpos/bad_qvel/bad_qacc mean MuJoCo found an invalid state and reset the data; the others (constraint/
+// contact buffer overflow, bad inertia or ctrl) corrupt the step.
+function warningNames(mj) {
+  return Object.entries(mj.mjtWarning).filter(([k]) => k.startsWith('mjWARN_')).sort((a, b) => a[1].value - b[1].value)
+    .map(([k]) => k.slice('mjWARN_'.length).toLowerCase().replace(/^bad(\w)/, 'bad_$1').replace('cnstrfull', 'constraint_full').replace('contactfull', 'contact_full'))
+}
 
 function mulberry32(seed) {
   let a = seed >>> 0
@@ -107,6 +117,8 @@ export class TaskSim {
     this.meta = meta
 
     this.dt = m.opt.timestep // m.opt is a reference view into the model: read it, never delete it
+    this.compiled = compiledPhysics(m) // must be the fresh model: see replay.js
+    this.warningNames = warningNames(mj)
     if (!TIMESTEPS.some(t => Math.abs(t - this.dt) < 1e-9)) {
       throw new Error(`timestep ${this.dt} must be one of ${TIMESTEPS.join(', ')} so control stays at ${CONTROL_HZ} Hz`)
     }
@@ -175,12 +187,7 @@ export class TaskSim {
       for (let g = 0; g < m.ngeom; g++) {
         if (m.geom_bodyid[g] === body && (m.geom_contype[g] || m.geom_conaffinity[g])) { geoms.push(g); this.objectOfGeom[g] = i }
       }
-      return {
-        name, body, geoms,
-        q: m.jnt_qposadr[jnt], v: m.jnt_dofadr[jnt],
-        mass0: m.body_mass[body],
-        inertia0: Array.from(m.body_inertia.slice(3 * body, 3 * body + 3)),
-      }
+      return { name, body, geoms, q: m.jnt_qposadr[jnt], v: m.jnt_dofadr[jnt] }
     })
     this.touching = new Uint8Array(2) // per hand: touching any task object
 
@@ -216,7 +223,7 @@ export class TaskSim {
       { name: 'touching', size: 2 },
     ], Math.ceil((task.timeout + 1) * CONTROL_HZ)) // preallocated: no buffer growth inside the physics loop
     this.rtf = { min: Infinity, sum: 0, n: 0 } // real-time factor samples supplied by the host while running
-    this.warnings = new Int32Array(WARNINGS.length)
+    this.warnings = new Int32Array(this.warningNames.length)
     this.lastQpos = new Float64Array(m.nq)
     this.lastQvel = new Float64Array(m.nv)
 
@@ -325,7 +332,7 @@ export class TaskSim {
   readWarnings() {
     const w = this.d.warning // reference view: elements may be deleted, the vector must not be
     let changed = false
-    for (let i = 0; i < WARNINGS.length; i++) {
+    for (let i = 0; i < this.warnings.length; i++) {
       const x = w.get(i)
       if (x.number !== this.warnings[i]) { this.warnings[i] = x.number; changed = true }
       x.delete()
@@ -367,20 +374,9 @@ export class TaskSim {
     return worst
   }
 
-  /** Applies randomized object properties { [objectName]: { mass?, friction? } } (replay.js mirrors this). */
+  /** Applies randomized object properties { [objectName]: { mass?, friction? } }; replay uses the same function. */
   setPhysics(params) {
-    const { mj, m, d } = this
-    for (const obj of this.objects) {
-      const p = params[obj.name]
-      if (!p) continue
-      if (p.mass !== undefined) {
-        const scale = p.mass / obj.mass0
-        m.body_mass[obj.body] = p.mass
-        for (let k = 0; k < 3; k++) m.body_inertia[3 * obj.body + k] = obj.inertia0[k] * scale
-      }
-      if (p.friction !== undefined) for (const g of obj.geoms) m.geom_friction[3 * g] = p.friction
-    }
-    mj.mj_setConst(m, d)
+    applyPhysics(this.mj, this.m, params, this.compiled, this.d)
     this.physics = params
   }
 
@@ -526,7 +522,7 @@ export class TaskSim {
     const duration = Math.max(0, this.recorder.frames - 1) * this.controlDt
     if (!this.onEpisode || this.recorder.frames === 0) return false
     if (duration < COMMON.minEpisode && outcome !== 'unstable') return false
-    const frames = this.recorder.snapshot()
+    const frames = this.recorder.view() // a view: onEpisode must copy (encode) it before the next episode
     const flags = []
     if (this.peakArmVel > COMMON.fastMotion) flags.push('fast_motion')
     if (outcome === 'unstable') flags.push('unstable')
@@ -553,7 +549,7 @@ export class TaskSim {
         objects: task.objects,
         peak_arm_velocity: this.peakArmVel,
         realtime_factor: this.rtf.n ? { min: this.rtf.min, mean: this.rtf.sum / this.rtf.n } : null,
-        mujoco_warnings: Object.fromEntries(WARNINGS.map((n, i) => [n, this.warnings[i]])),
+        mujoco_warnings: Object.fromEntries(this.warningNames.map((n, i) => [n, this.warnings[i]])),
         flags,
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
@@ -567,6 +563,8 @@ export class TaskSim {
         qpos_names: this.qposNames,
         qvel_names: this.qvelNames,
         actuator_names: this.actuatorNames,
+        input_names: INPUT_NAMES,
+        raw_layout: RAW_LAYOUT,
         fields: this.recorder.fields,
         frame_size: this.recorder.frameSize,
         frames: this.recorder.frames,

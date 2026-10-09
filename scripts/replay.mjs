@@ -2,18 +2,19 @@
 //   node scripts/replay.mjs episodes.iamr                 verify every episode replays bit-for-bit
 //   node scripts/replay.mjs episodes.iamr poses.ndjson    also stream per-frame body poses for a renderer
 // The dump is newline-delimited JSON: one {"episode": header} line, then one {"t", "xpos", "xquat"} line per
-// frame (MuJoCo body order, world frame, quaternions w,x,y,z). A renderer needs only the logged qpos; this
-// script is the reference for how the actions + events reproduce them, and a check that the headset's build
-// matches this one.
+// frame (MuJoCo body order, world frame, quaternions w,x,y,z), written with back-pressure so memory stays flat.
+// A renderer needs only the logged qpos; this script is the reference for how the actions + events reproduce
+// them, and a check that the headset's build matches this one.
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs'
+import { once } from 'node:events'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { decodeEpisodes } from '../src/sim/episode.js'
+import { iterateEpisodes } from '../src/sim/episode.js'
 import { loadScene } from '../src/sim/loadScene.js'
 import { TIMESTEPS } from '../src/sim/TaskSim.js'
-import { TASKS } from '../src/sim/tasks/index.js'
-import { applyPhysics, compiledPhysics, replayEpisode } from '../src/sim/replay.js'
+import { TASKS, hasTask } from '../src/sim/tasks/index.js'
+import { applyPhysics, compiledPhysics, replayFrames } from '../src/sim/replay.js'
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
 // the package does not export its package.json, so read it from node_modules directly
@@ -24,15 +25,16 @@ if (!file) { console.error('usage: node scripts/replay.mjs <episodes.iamr> [pose
 const mj = await loadMujoco()
 const readFile = async p => (p.endsWith('.xml') ? fs.promises.readFile(path.join(PUBLIC, p), 'utf8') : new Uint8Array(await fs.promises.readFile(path.join(PUBLIC, p))))
 const bytes = await fs.promises.readFile(file)
-const episodes = decodeEpisodes(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)) // Buffer may be a pooled slice
 const models = new Map() // `${scene}|${timestep}` -> compiled model, asset hashes, compiled physics
 const sink = out ? fs.createWriteStream(out) : null
+const write = async line => { if (!sink.write(line + '\n')) await once(sink, 'drain') }
 let failures = 0
 
-for (const { header, frames } of episodes) {
+// Buffer may be a pooled slice; iterate so only one episode's frames are decoded at a time
+for (const { header, frames } of iterateEpisodes(bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength))) {
   const tag = `episode ${header.episode} (${header.task}, ${header.outcome}, ${header.frames} frames)`
   // headers come from a downloaded file: only load scenes this build knows, at timesteps it supports
-  if (TASKS[header.task]?.scene !== header.scene || !TIMESTEPS.includes(header.timestep)) {
+  if (!hasTask(header.task) || TASKS[header.task].scene !== header.scene || !TIMESTEPS.includes(header.timestep)) {
     failures++; console.error(`${tag}: unknown scene/timestep ${header.scene} @ ${header.timestep}`); continue
   }
   if (header.mujoco !== INSTALLED_MUJOCO) console.warn(`${tag}: recorded with MuJoCo ${header.mujoco}, installed ${INSTALLED_MUJOCO}; replay may differ`)
@@ -44,12 +46,15 @@ for (const { header, frames } of episodes) {
   const { model: m, assets, base } = models.get(key)
   const stale = Object.entries(header.assets ?? {}).filter(([p, h]) => assets[p] !== h).map(([p]) => p)
   if (stale.length) console.warn(`${tag}: assets changed since recording: ${stale.join(', ')}`)
-  applyPhysics(mj, m, header, base)
-  if (sink) sink.write(JSON.stringify({ episode: header }) + '\n')
-  const r = replayEpisode(mj, m, header, frames, {
-    onFrame: sink ? (i, d) => sink.write(JSON.stringify({ t: i / header.control_hz, xpos: Array.from(d.xpos), xquat: Array.from(d.xquat) }) + '\n') : null,
-  })
-  if (r.mismatch >= 0) { failures++; console.error(`${tag}: diverged at frame ${r.mismatch}`) }
+  applyPhysics(mj, m, header.physics, base)
+  if (sink) await write(JSON.stringify({ episode: header }))
+  const gen = replayFrames(mj, m, header, frames)
+  let r = gen.next()
+  while (!r.done) {
+    if (sink) await write(JSON.stringify({ t: r.value.i / header.control_hz, xpos: Array.from(r.value.d.xpos), xquat: Array.from(r.value.d.xquat) }))
+    r = gen.next()
+  }
+  if (r.value >= 0) { failures++; console.error(`${tag}: diverged at frame ${r.value}`) }
   else console.log(`${tag}: replays bit-for-bit`)
 }
 if (sink) await new Promise(resolve => sink.end(resolve))

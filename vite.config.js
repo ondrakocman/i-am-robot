@@ -1,5 +1,5 @@
 import { execSync } from 'node:child_process'
-import { copyFileSync, readFileSync } from 'node:fs'
+import { copyFileSync, cpSync, readFileSync } from 'node:fs'
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import basicSsl from '@vitejs/plugin-basic-ssl'
@@ -12,11 +12,16 @@ try { gitSha = execSync('git describe --always --dirty', { stdio: ['ignore', 'pi
 // Deployed under /<repo>/ on GitHub Pages; override with BASE_PATH for any other host
 const basePath = process.env.BASE_PATH ?? (process.env.GITHUB_REPOSITORY ? `/${process.env.GITHUB_REPOSITORY.split('/')[1]}/` : '/i-am-robot/')
 
-// The deployed bundle redistributes MuJoCo (Apache-2.0) and many MIT/Apache/CC-BY libraries: ship the notices
-// with it. rollup-plugin-license collects every bundled package's license text; THIRD_PARTY.md covers assets.
+// The deployed bundle redistributes MuJoCo (Apache-2.0, statically linking Qhull, libccd, tinyxml2 and more)
+// and many MIT/Apache/CC-BY libraries: ship the notices with it. rollup-plugin-license collects every bundled
+// npm package's license text; licenses/ holds the texts for mujoco.wasm's statically linked libraries, which
+// npm cannot see; THIRD_PARTY.md covers assets and points at both.
 const thirdPartyNotices = () => ({
   name: 'third-party-notices',
-  closeBundle() { copyFileSync('THIRD_PARTY.md', 'dist/THIRD_PARTY.md') },
+  closeBundle() {
+    copyFileSync('THIRD_PARTY.md', 'dist/THIRD_PARTY.md')
+    cpSync('licenses', 'dist/licenses', { recursive: true })
+  },
 })
 const bundledLicenses = () => license({
   thirdParty: {
@@ -30,7 +35,7 @@ export default defineConfig(({ command, isPreview }) => ({
   plugins: [
     react(),
     thirdPartyNotices(),
-    ...(command === 'serve' && !isPreview ? [basicSsl()] : []), // WebXR needs https, also on the LAN
+    ...(command === 'serve' ? [basicSsl()] : []), // dev and preview: WebXR needs https, also on the LAN
   ],
   base: command === 'build' || isPreview ? basePath : '/',
   define: {
@@ -44,9 +49,6 @@ export default defineConfig(({ command, isPreview }) => ({
     chunkSizeWarningLimit: 2200, // the XR emulator's room models (lazy, localhost only) are ~2 MB
     rollupOptions: { plugins: [bundledLicenses()] },
   },
-  server: {
-    https: true,
-    host: '0.0.0.0',
-    port: 5173,
-  },
+  server: { host: '0.0.0.0', port: 5173 }, // basicSsl turns https on
+  preview: { host: '0.0.0.0', port: 4173 },
 }))

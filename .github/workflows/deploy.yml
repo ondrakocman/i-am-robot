@@ -27,14 +27,11 @@ jobs:
       - run: npm ci
       - run: pip install numpy==2.4.2
       - run: npm run lint
-      - run: node scripts/sim-check.mjs tube_box n=2 out=/tmp/tube_box.iamr
-      - run: node scripts/sim-check.mjs conveyor n=2 out=/tmp/conveyor.iamr
-      - run: node scripts/sim-check.mjs cube_sort n=2 out=/tmp/cube_sort.iamr
+      - run: npm test
+      - run: node scripts/sim-check.mjs all n=2 out=/tmp/all.iamr
       # the same file path a headset download takes: decode in Node and in Python, replay, dump poses
-      - run: cat /tmp/tube_box.iamr /tmp/conveyor.iamr /tmp/cube_sort.iamr > /tmp/all.iamr
       - run: node scripts/replay.mjs /tmp/all.iamr /tmp/poses.ndjson
       - run: python3 scripts/load_episodes.py /tmp/all.iamr
-      - run: node scripts/unit-tests.mjs
       - run: npm run build
       - uses: actions/upload-pages-artifact@v3
         if: github.event_name != 'pull_request'

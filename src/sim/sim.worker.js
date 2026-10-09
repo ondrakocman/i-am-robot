@@ -56,8 +56,8 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
     autopilot,
     meta: { session, app_version: appVersion, mujoco: __MUJOCO_VERSION__, assets },
     onEpisode: ({ header, frames }) => {
-      const buffer = encodeEpisode(header, frames)
-      self.postMessage({ type: 'episode', header, buffer }, [buffer])
+      // encode copies the frames once; the Blob crosses to the main thread without another copy
+      self.postMessage({ type: 'episode', header, data: new Blob([encodeEpisode(header, frames)]) })
     },
   })
 
@@ -68,7 +68,10 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
     eye: sim.eyePosition(),
     // palm site relative to the wrist body, per hand: where the renderer measures the ghost-hand gap
     palmOffset: sim.arms.map(a => [0, 1, 2].map(k => m.site_pos[3 * a.palmSite + k])),
-    task: { name: task.name, instruction: task.instruction, title: task.title ?? task.instruction, objects: task.objects, resetButton: COMMON.resetButton },
+    task: {
+      name: task.name, instruction: task.instruction, title: task.title ?? task.instruction, objects: task.objects,
+      resetButton: COMMON.resetButton, materials: task.materials ?? {}, geometry: task.geometry ?? {},
+    },
     timestep: sim.dt,
   }, transfer)
   lastTick = perf.windowStart = performance.now()
@@ -91,7 +94,7 @@ function tick() {
   if (now - lastInput > INPUT_TIMEOUT_MS) sim.clearInput()
 
   if (sim.status === 'waiting') {
-    sim.step() // physics frozen; just polls input and the reset button
+    sim.step() // physics frozen; the controller only watches for the operator's hands
     owed = 0
     // the real-time window measures stepping only: restart it so idle time doesn't count as slow physics
     perf.windowStart = now

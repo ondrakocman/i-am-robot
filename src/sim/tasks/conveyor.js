@@ -43,6 +43,10 @@ export default {
   scene: 'mujoco/conveyor.xml',
   objects: Array.from({ length: POOL }, (_, i) => `package${i}`),
   timeout: 150,
+  materials: {
+    cardboard: { roughness: 0.95 }, tag: { roughness: 0.6 }, tagbar: { roughness: 0.6 },
+    roller: { roughness: 0.4, metalness: 0.6 }, rail: { roughness: 0.45, metalness: 0.7 }, leg: { roughness: 0.6, metalness: 0.5 },
+  },
 
   randomize(rng) {
     const u = (lo, hi) => lo + (hi - lo) * rng()

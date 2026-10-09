@@ -31,6 +31,7 @@ export default {
   objects: CUBES.map((_, i) => `cube${i}`),
   dropZ: 0.68,
   timeout: 120,
+  materials: Object.fromEntries([...['red', 'green', 'blue'].map(c => [c, { roughness: 0.55 }]), ...['red_bin', 'green_bin', 'blue_bin'].map(c => [c, { roughness: 0.7 }])]), // printed PLA, plastic bins
 
   randomize(rng) {
     const u = (lo, hi) => lo + (hi - lo) * rng()

@@ -18,7 +18,7 @@
     "preview": "vite preview --host 0.0.0.0",
     "lint": "eslint .",
     "sim-check": "node scripts/sim-check.mjs",
-    "check": "npm run lint && npm test && node scripts/sim-check.mjs tube_box n=1 && node scripts/sim-check.mjs conveyor n=1 && node scripts/sim-check.mjs cube_sort n=1",
+    "check": "npm run lint && npm test && node scripts/sim-check.mjs all n=2",
     "test": "node scripts/unit-tests.mjs"
   },
   "dependencies": {
@@ -36,6 +36,7 @@
     "@vitejs/plugin-react": "^4.3.4",
     "eslint": "^10.12.0",
     "eslint-plugin-react-hooks": "^7.1.1",
+    "fake-indexeddb": "^6.2.5",
     "globals": "^17.13.0",
     "rollup-plugin-license": "^3.7.1",
     "vite": "^6.0.5"

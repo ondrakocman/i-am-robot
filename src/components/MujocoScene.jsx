@@ -8,7 +8,7 @@ import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
 import { XR_JOINT_NAMES, ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
 import { HAND_INPUT, INPUT_SIZE, RAW_SIZE } from '../sim/TaskSim.js'
 import { saveEpisode, onEpisodesChanged, requestPersistence } from '../sim/episodeStore.js'
-import { TASKS } from '../sim/tasks/index.js'
+import { hasTask } from '../sim/tasks/index.js'
 
 const params = new URLSearchParams(location.search)
 const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
@@ -22,23 +22,9 @@ const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
 const DARK_MESH = /^(head_link|logo_link)$|_hand_palm_link$/   // palm mesh hangs off the (silver) wrist body
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
 const SHADOW_CASTER_BODY = /elbow|wrist|hand/
-// Surface look per MuJoCo material name (colors come from the MJCF); anything else is a matte default
-const MATERIAL_LOOK = {
-  floor: { roughness: 0.95 },
-  table: { roughness: 0.75 },
-  table_leg: { roughness: 0.8 },
-  box: { roughness: 0.85 },                                 // matte plastic
-  tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 },  // brushed steel
-  cardboard: { roughness: 0.95 },
-  tag: { roughness: 0.6 },
-  tagbar: { roughness: 0.6 },
-  roller: { roughness: 0.4, metalness: 0.6 },
-  rail: { roughness: 0.45, metalness: 0.7 },
-  leg: { roughness: 0.6, metalness: 0.5 },
-  stop: { roughness: 0.6 },
-  red: { roughness: 0.55 }, green: { roughness: 0.55 }, blue: { roughness: 0.55 },        // printed PLA
-  red_bin: { roughness: 0.7 }, green_bin: { roughness: 0.7 }, blue_bin: { roughness: 0.7 },
-}
+// Surface look per MuJoCo material name shared by every scene (colors come from the MJCF); tasks add their
+// own via `materials`, anything else is a matte default
+const COMMON_LOOK = { floor: { roughness: 0.95 }, table: { roughness: 0.75 }, table_leg: { roughness: 0.8 }, stop: { roughness: 0.6 } }
 // Visible room around the robot (robot frame: x forward, z up); visual only, nothing collides with it.
 // The box bottom sits 2 cm under the MuJoCo floor plane so the two don't z-fight.
 const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.43], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.87] }
@@ -105,7 +91,7 @@ export function MujocoScene() {
         setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`)
       } else if (data.type === 'episode') {
         saves.current.pending++
-        saveEpisode(data.header, data.buffer)
+        saveEpisode(data.header, data.data)
           .catch(err => console.error('[episodes] save failed, kept in memory for download', err))
           .finally(() => { saves.current.pending-- })
       } else if (data.type === 'error') {
@@ -119,7 +105,7 @@ export function MujocoScene() {
       timestep: Number(params.get('dt')) || undefined,
       autopilot: params.has('autopilot'),
       session: SESSION_ID,
-      task: TASKS[params.get('task')] ? params.get('task') : undefined, // unknown names fall back like the selector
+      task: hasTask(params.get('task')) ? params.get('task') : undefined, // unknown names fall back like the selector
       appVersion: __GIT_SHA__,
     })
     const unsubscribe = onEpisodesChanged(s => Object.assign(saves.current, s))
@@ -254,6 +240,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
   const headMeshes = []
   const meshCache = new Map()
   const materialCache = new Map()
+  const looks = { ...COMMON_LOOK, ...task.materials }
 
   const objects = new Set(task.objects)
   for (const geom of scene.geoms) {
@@ -268,7 +255,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
         materialCache.set(key, new THREE.MeshStandardMaterial({
           color: new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace),
           roughness: 0.6, transparent: a < 1, opacity: a, flatShading: geom.mesh >= 0,
-          ...(MATERIAL_LOOK[geom.material] ?? {}),
+          ...(looks[geom.material] ?? {}),
         }))
       }
       material = materialCache.get(key)
@@ -278,7 +265,7 @@ function buildWorld({ scene, eye, task, palmOffset }) {
       const kind = PAD_BODY.test(bodyName) ? 2 : DARK_BODY.test(bodyName) || DARK_MESH.test(meshName) ? 1 : 0
       material = hand >= 0 ? handMaterials[hand][kind] : [MAT_BODY, MAT_ACCENT, MAT_PAD][kind]
     }
-    const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache), material)
+    const mesh = new THREE.Mesh(geomGeometry(geom, scene.meshes, meshCache, task.geometry[geom.name]), material)
     mesh.position.fromArray(geom.pos)
     mesh.quaternion.set(geom.quat[1], geom.quat[2], geom.quat[3], geom.quat[0])
     // One shadow pass: only the forearms, hands and task objects cast; the scene receives
@@ -339,20 +326,20 @@ function buildWorld({ scene, eye, task, palmOffset }) {
   return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies, palmOffsets }
 }
 
-function geomGeometry(g, meshes, cache) {
+function geomGeometry(g, meshes, cache, override) {
   const [s0, s1, s2] = g.size
+  if (override?.hollowCylinder && g.type === 'cylinder') {
+    // a tube drawn with a real bore (the task's physics models the wall separately)
+    const ri = s0 - override.hollowCylinder.wall
+    const profile = [[ri, -s1], [s0, -s1], [s0, s1], [ri, s1], [ri, -s1]].map(([x, y]) => new THREE.Vector2(x, y))
+    return new THREE.LatheGeometry(profile, 48).rotateX(Math.PI / 2)
+  }
   switch (g.type) {
     case 'plane': return new THREE.PlaneGeometry(s0 > 0 ? 2 * s0 : 30, s1 > 0 ? 2 * s1 : 30)
     case 'sphere': return new THREE.SphereGeometry(s0, 24, 16)
     case 'capsule': return new THREE.CapsuleGeometry(s0, 2 * s1, 8, 16).rotateX(Math.PI / 2)
     case 'ellipsoid': return new THREE.SphereGeometry(1, 24, 16).scale(s0, s1, s2)
-    case 'cylinder': {
-      if (g.material !== 'tube') return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
-      // Hollow tube with a 2 mm wall; the physics has a matching ring of thin boxes (see tube_box.xml)
-      const ri = s0 - 0.002
-      const profile = [[ri, -s1], [s0, -s1], [s0, s1], [ri, s1], [ri, -s1]].map(([x, y]) => new THREE.Vector2(x, y))
-      return new THREE.LatheGeometry(profile, 48).rotateX(Math.PI / 2)
-    }
+    case 'cylinder': return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
     case 'box': return new THREE.BoxGeometry(2 * s0, 2 * s1, 2 * s2)
     case 'mesh': {
       if (!cache.has(g.mesh)) {
@@ -422,6 +409,7 @@ function makeGhostHand() {
         }
       }
       pos.needsUpdate = true
+      lineGeo.setDrawRange(0, i) // segments with a missing joint are not drawn
       jointNames.forEach((n, k) => {
         const p = joints[n]?.position
         _dummy.position.copy(p ?? lines.position)
@@ -634,7 +622,7 @@ function readHandJoints(xrFrame, hand, refSpace, h) {
   if (xrFrame.fillPoses && h.spaces.every(Boolean) && xrFrame.fillPoses(h.spaces, refSpace, h.poses)) {
     XR_JOINT_NAMES.forEach((name, i) => {
       const o = 16 * i
-      if (h.poses[o + 15] === 0) return // NaN/zero matrix = untracked joint
+      if (h.poses[o + 15] === 0) return // an all-zero matrix = untracked joint (NaN is caught below)
       const j = h.joints[name]
       h.matrix.fromArray(h.poses, o).decompose(j.position, j.quaternion, h.scale)
       if (Number.isFinite(j.position.x)) joints[name] = j

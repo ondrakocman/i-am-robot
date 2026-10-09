@@ -88,3 +88,27 @@ test('episode file: encode -> decode round trip and corruption detection', () =>
   const bad = { ...header, frames: 2 }
   assert.throws(() => decodeEpisodes(encodeEpisode(bad, rec.snapshot())), /does not match/)
 })
+
+test('episode store: a failing database keeps episodes in memory and still exports them', async () => {
+  // a broken IndexedDB (storage disabled, blocked, evicted) must never lose an episode or freeze the counters
+  globalThis.indexedDB = { open: () => { const r = {}; setTimeout(() => { r.error = new Error('storage disabled'); r.onerror?.() }, 0); return r } }
+  globalThis.IDBKeyRange = { only: v => v }
+  const store = await import('../src/sim/episodeStore.js')
+  const seen = []
+  store.onEpisodesChanged(s => seen.push({ ...s }))
+  await assert.rejects(store.saveEpisode({ success: true, task: 't' }, new Blob([new Uint8Array([1, 2, 3])])))
+  assert.equal(seen.at(-1).unsaved, 1)
+  const blob = await store.exportEpisodes()
+  assert.equal(blob.size, 3)
+  await store.clearEpisodes()
+  assert.equal(seen.at(-1).unsaved, 0)
+  // and a working database counts, indexes and exports normally
+  await import('fake-indexeddb/auto')
+  const fresh = await import('../src/sim/episodeStore.js?fresh=1')
+  await fresh.saveEpisode({ success: true, task: 't' }, new Blob([new Uint8Array(4)]))
+  await fresh.saveEpisode({ success: false, task: 't' }, new Blob([new Uint8Array(2)]))
+  const s = await new Promise(resolve => fresh.onEpisodesChanged(resolve))
+  assert.equal(s.total, 2)
+  assert.equal(s.success, 1)
+  assert.equal((await fresh.exportEpisodes()).size, 6)
+})

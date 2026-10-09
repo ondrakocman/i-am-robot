@@ -1,21 +1,30 @@
 // Reference replay of a recorded episode: initial state + initial ctrl + logged actions + logged teleport events
-// must reproduce the logged qpos/qvel bit-for-bit with the same MuJoCo build. Used by scripts/sim-check.mjs and
-// scripts/replay.mjs; also the specification of how a downstream renderer should step an episode.
+// must reproduce the logged qpos/qvel bit-for-bit with the same MuJoCo build. Used by TaskSim (physics
+// randomization), scripts/sim-check.mjs and scripts/replay.mjs; also the specification of how a downstream
+// renderer should step an episode.
 
 /**
- * Snapshot of the compiled mass/inertia, taken on a freshly loaded model. The recorder scales the compiled
- * inertia by mass/compiled_mass; replay must do the same arithmetic from the same values to be bit-identical,
- * so it scales from this snapshot rather than from whatever a previous episode left in the model.
+ * Snapshot of the compiled mass/inertia/friction, taken on a freshly loaded model. Randomized physics scales
+ * the compiled inertia by mass/compiled_mass; the recorder and replay must do that arithmetic from the same
+ * values to be bit-identical, so both scale from this snapshot rather than from whatever a previous episode
+ * left in the model.
  */
 export function compiledPhysics(m) {
-  return { mass: Float64Array.from(m.body_mass), inertia: Float64Array.from(m.body_inertia) }
+  return { mass: Float64Array.from(m.body_mass), inertia: Float64Array.from(m.body_inertia), friction: Float64Array.from(m.geom_friction) }
 }
 
-/** Applies the header's randomized physics (mass with scaled inertia, sliding friction) to a model. */
-export function applyPhysics(mj, m, header, base) {
-  for (const [name, p] of Object.entries(header.physics ?? {})) {
+/**
+ * Applies randomized object physics { [bodyName]: { mass?, friction? } } to the model, restoring every body
+ * and geom to its compiled values first so nothing leaks between episodes. `d` is the data to recompute
+ * constants into (a scratch MjData is used if omitted).
+ */
+export function applyPhysics(mj, m, params, base, d = null) {
+  m.body_mass.set(base.mass)
+  m.body_inertia.set(base.inertia)
+  m.geom_friction.set(base.friction)
+  for (const [name, p] of Object.entries(params ?? {})) {
     const body = mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY.value, name)
-    if (body < 0) throw new Error(`replay: model has no body ${name}`)
+    if (body < 0) throw new Error(`physics: model has no body ${name}`)
     if (p.mass !== undefined) {
       const scale = p.mass / base.mass[body]
       m.body_mass[body] = p.mass
@@ -27,24 +36,23 @@ export function applyPhysics(mj, m, header, base) {
       }
     }
   }
-  const d = new mj.MjData(m)
-  mj.mj_setConst(m, d)
-  d.delete()
+  const scratch = d ?? new mj.MjData(m)
+  mj.mj_setConst(m, scratch)
+  if (!d) scratch.delete()
 }
 
 /**
- * Steps through an episode, comparing each logged frame against the simulated state.
- * Returns { frames, mismatch } where mismatch is the first diverging frame index (-1 if none), plus the
- * largest absolute qpos/qvel difference seen before any mismatch.
+ * Steps through an episode, yielding { i, d } for every frame whose logged qpos/qvel the simulation
+ * reproduced exactly (forward kinematics already run on d), and finally returning the index of the first
+ * diverging frame (-1 if none). The MjData is deleted when the generator finishes or is closed.
  */
-export function replayEpisode(mj, m, header, frames, { onFrame = null } = {}) {
+export function* replayFrames(mj, m, header, frames) {
   const field = Object.fromEntries(header.fields.map(f => [f.name, f]))
   const d = new mj.MjData(m)
   d.qpos.set(header.initial_qpos)
   d.ctrl.set(header.initial_ctrl ?? [])
   const q32 = new Float32Array(header.nq)
   const v32 = new Float32Array(header.nv)
-  let mismatch = -1
   let ev = 0
   try {
     for (let i = 0; i < header.frames; i++) {
@@ -52,11 +60,10 @@ export function replayEpisode(mj, m, header, frames, { onFrame = null } = {}) {
       // Each frame logs the state at its control tick, before that tick's physics steps
       q32.set(d.qpos)
       v32.set(d.qvel)
-      for (let k = 0; k < header.nq; k++) if (q32[k] !== frames[o + field.qpos.offset + k]) { mismatch = i; break }
-      if (mismatch < 0) for (let k = 0; k < header.nv; k++) if (v32[k] !== frames[o + field.qvel.offset + k]) { mismatch = i; break }
-      if (mismatch >= 0) break
-      // d.xpos/xquat still describe the previous substep: run forward kinematics on this frame's qpos first
-      if (onFrame) { mj.mj_kinematics(m, d); onFrame(i, d) }
+      for (let k = 0; k < header.nq; k++) if (q32[k] !== frames[o + field.qpos.offset + k]) return i
+      for (let k = 0; k < header.nv; k++) if (v32[k] !== frames[o + field.qvel.offset + k]) return i
+      mj.mj_kinematics(m, d) // d.xpos/xquat still described the previous substep
+      yield { i, d }
       // Logged teleports (spawns) come after the frame they are tagged with, before the steps to the next one
       for (; ev < header.events.length && header.events[ev].tick === i; ev++) {
         const e = header.events[ev]
@@ -66,8 +73,16 @@ export function replayEpisode(mj, m, header, frames, { onFrame = null } = {}) {
       for (let a = 0; a < header.nu; a++) d.ctrl[a] = frames[o + field.action.offset + a]
       for (let s = 0; s < header.steps_per_control; s++) mj.mj_step(m, d)
     }
+    return -1
   } finally {
     d.delete()
   }
-  return { frames: header.frames, mismatch }
+}
+
+/** Replays a whole episode; returns { frames, mismatch } with mismatch = first diverging frame or -1. */
+export function replayEpisode(mj, m, header, frames) {
+  const gen = replayFrames(mj, m, header, frames)
+  let r = gen.next()
+  while (!r.done) r = gen.next()
+  return { frames: header.frames, mismatch: r.value }
 }

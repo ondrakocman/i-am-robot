@@ -41,14 +41,15 @@ before it). Then the episode is saved and the scene re-randomizes (object placem
 speed), all logged.
 
 Adding a task: one module in `src/sim/tasks/` (scene XML, object list, `reset`/`randomize`, `goal` or `update`,
-optional `solved` for the headless check) and a line in `tasks/index.js`.
+`solved` and `reachTargets` for the headless check, `materials`/`geometry` for the renderer) and a line in
+`tasks/index.js`; the check script picks it up automatically.
 
 ## Running it
 
 ```
 npm install
 npm run dev          # https://<your-ip>:5173 in the Quest browser (self-signed certificate: accept it once)
-npm run check        # lint + headless task checks (the CI gate)
+npm run check        # lint, unit tests and the headless task checks CI runs (CI also replays the recorded file)
 npm run build
 ```
 
@@ -77,8 +78,8 @@ Replay: `initial_qpos` + `initial_ctrl` + `physics` + actions + events reproduce
 same `@mujoco/mujoco` build (`src/sim/replay.js` is the reference). A renderer needs only the logged `qpos`, so
 camera images can be produced offline from any viewpoint with any renderer.
 
-What is collected: robot and object state, your head pose and hand skeleton at 50 Hz, and a random session id.
-Nothing is uploaded; the data stays in the headset until you download it. Hand and head motion are personal
+What is collected: robot and object state, your head pose and hand skeleton at 50 Hz, wall-clock start/end
+times, and a random session id. Nothing is uploaded; the data stays in the headset until you download it. Hand and head motion are personal
 data, so get consent before sharing datasets recorded by others.
 
 ## Fidelity choices
@@ -104,9 +105,11 @@ data, so get consent before sharing datasets recorded by others.
 - `scripts/sim-check.mjs` headless gate (task success, bit-exact replay, instability handling, goal
   reachability, reset validity); `scripts/unit-tests.mjs` (frame conversions, retargeting, file round trip);
   `scripts/replay.mjs`; `scripts/load_episodes.py`
+- `zustand` is a dependency only because the XR emulator's dev UI (`@iwer/devui`, localhost only) imports it
+  without declaring it; the app itself does not use it
 - `scripts/build-g1-mjcf.py`, `scripts/build-conveyor-scene.py`, `scripts/decimate-meshes.py`,
   `scripts/convert-object.py` regenerate the generated assets (`pip install -r requirements.txt`, Python ≥ 3.11;
-  decimation and convex decomposition are only reproducible with the pinned versions); `assets/` holds source
-  models that are not served
+  decimation reproduces exactly with the pinned versions, CoACD's hulls can differ slightly between machines, which
+  changes the asset hashes in new episodes); `assets/` holds source models that are not served
 
 License: MIT (see `LICENSE`); third-party assets in `THIRD_PARTY.md`.

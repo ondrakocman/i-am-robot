@@ -16,7 +16,9 @@ Each episode is a dict with the JSON header under 'header' and one read-only flo
             actuators (conveyor belt motors).
   qpos/qvel full simulation state incl. the free objects, named in header['qpos_names'] / ['qvel_names'];
             a free object's angular velocity (wx, wy, wz) is in the object's body frame, MuJoCo convention
-  input     retargeted operator command per hand: tracked, palm pos (3), palm quat wxyz (4), 7 finger commands
+  input     retargeted operator command per hand, columns named in header['input_names']: tracked, palm pos (3),
+            palm quat wxyz (4), thumb rotation [-1, 1], then curls [0, 1] for thumb_1, thumb_2, index_0, index_1,
+            middle_0, middle_1
   raw       viewer (head) pose (pos 3 + quat wxyz 4) then 25 WebXR joints per hand (pos 3 + quat wxyz 4), all
             in the robot frame; an untracked joint is all zeros
   touching  per hand: 1 while it touches any task object

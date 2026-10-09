@@ -1,5 +1,7 @@
 // Recorded episodes live in IndexedDB on the headset until downloaded. The download is one .iamr file:
-// the episode chunks concatenated (see episode.js and scripts/load_episodes.py).
+// the episode chunks concatenated (see episode.js and scripts/load_episodes.py). Episodes the database
+// refuses (quota, eviction, storage disabled, an upgrade blocked by another tab) stay in memory and are
+// still part of the next download.
 
 const DB_NAME = 'i-am-robot'
 const DB_VERSION = 2
@@ -21,7 +23,8 @@ function db() {
       resolve(d)
     }
     req.onerror = () => { dbPromise = null; reject(req.error) }
-    req.onblocked = () => { dbPromise = null; reject(new Error('IndexedDB upgrade blocked by another tab')) }
+    // `blocked` is not a failure: the open completes once the other tab lets go. Just say so meanwhile.
+    req.onblocked = () => { stats = { ...stats, blocked: true }; notify() }
   })
   return dbPromise
 }
@@ -38,21 +41,27 @@ function run(mode, fn) {
 }
 
 const listeners = new Set()
-let stats = null
-// Episodes IndexedDB refused (quota, eviction, blocked upgrade) are kept here so a download still gets them
-const unsaved = []
+const unsaved = [] // Blobs the database refused, in recording order
+let stats = { total: 0, success: 0, unsaved: 0, blocked: false, available: null } // available: null until the first open settles
+const notify = () => listeners.forEach(fn => fn(stats))
+
 async function refreshStats() {
-  const [total, success] = await Promise.all([run('readonly', s => s.count()), run('readonly', s => s.index('success').count(IDBKeyRange.only(1)))])
-  stats = { total, success, unsaved: unsaved.length }
-  listeners.forEach(fn => fn(stats))
+  try {
+    const [total, success] = await Promise.all([run('readonly', s => s.count()), run('readonly', s => s.index('success').count(IDBKeyRange.only(1)))])
+    stats = { ...stats, total, success, blocked: false, available: true }
+  } catch (err) {
+    console.error('[episodes] storage unavailable', err)
+    stats = { ...stats, available: false }
+  }
+  notify()
   return stats
 }
 
-/** Calls fn with { total, success } now and after every change. */
+/** Calls fn with the current stats now and after every change. */
 export function onEpisodesChanged(fn) {
   listeners.add(fn)
-  if (stats) fn(stats)
-  else refreshStats().catch(err => console.error('[episodes]', err))
+  fn(stats)
+  if (stats.available === null) refreshStats()
   return () => listeners.delete(fn)
 }
 
@@ -63,31 +72,37 @@ export async function requestPersistence() {
 }
 
 /**
- * Resolves once the episode is committed to disk. If IndexedDB refuses it (quota, eviction), the episode is
- * kept in memory for the next download and the promise rejects so the UI can say so.
+ * Resolves once the episode is committed to disk. If the database refuses it, the episode is kept in memory
+ * for the next download and the promise rejects so the UI can say so.
  */
-export async function saveEpisode(header, buffer) {
-  const data = new Blob([buffer])
+export async function saveEpisode(header, data) {
   try {
     // the success index needs a key, so booleans are stored as 0/1
     await run('readwrite', s => s.add({ header, success: header.success ? 1 : 0, task: header.task, data }))
-    if (stats) stats = { ...stats, total: stats.total + 1, success: stats.success + (header.success ? 1 : 0) }
+    stats = { ...stats, total: stats.total + 1, success: stats.success + (header.success ? 1 : 0), available: true }
   } catch (err) {
     unsaved.push(data)
-    if (stats) stats = { ...stats, unsaved: unsaved.length }
+    stats = { ...stats, unsaved: unsaved.length }
     throw err
   } finally {
-    if (stats) listeners.forEach(fn => fn(stats))
+    notify()
   }
 }
 
 /** One Blob of every stored episode in recording order, followed by any the database refused. */
 export async function exportEpisodes() {
-  const all = await run('readonly', s => s.getAll())
-  return new Blob([...all.map(e => e.data), ...unsaved], { type: 'application/octet-stream' })
+  let stored = []
+  try {
+    stored = await run('readonly', s => s.getAll())
+  } catch (err) {
+    console.error('[episodes] storage unavailable, exporting the in-memory episodes only', err)
+  }
+  return new Blob([...stored.map(e => e.data), ...unsaved], { type: 'application/octet-stream' })
 }
 
 export async function clearEpisodes() {
-  await run('readwrite', s => s.clear())
+  unsaved.length = 0
+  stats = { ...stats, unsaved: 0 }
+  try { await run('readwrite', s => s.clear()) } catch (err) { console.error('[episodes] clear failed', err) }
   await refreshStats()
 }

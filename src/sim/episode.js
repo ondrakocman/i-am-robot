@@ -20,8 +20,12 @@ export function encodeEpisode(header, frames) {
 
 /** Parses a .iamr file (one or more chunks) into [{ header, frames: Float32Array }]. */
 export function decodeEpisodes(buffer) {
+  return [...iterateEpisodes(buffer)]
+}
+
+/** Same as decodeEpisodes, one episode at a time (only one episode's frames are copied at once). */
+export function* iterateEpisodes(buffer) {
   const view = new DataView(buffer)
-  const episodes = []
   let o = 0
   while (o < buffer.byteLength) {
     if (view.getUint32(o, true) !== EPISODE_MAGIC) throw new Error(`bad magic at byte ${o}`)
@@ -37,9 +41,8 @@ export function decodeEpisodes(buffer) {
     // copy so the frames are 4-byte aligned regardless of the chunk offset
     const frames = new Float32Array(buffer.slice(o, o + dataBytes))
     o += dataBytes
-    episodes.push({ header, frames })
+    yield { header, frames }
   }
-  return episodes
 }
 
 /** Fixed-layout frame log. `fields` is [{ name, size }] in frame order; `capacity` frames are preallocated. */
@@ -71,6 +74,9 @@ export class EpisodeRecorder {
     }
     this.frames++
   }
+
+  /** The recorded frames as a view into the buffer (valid until clear()); copy before keeping it. */
+  view() { return this.buf.subarray(0, this.frames * this.frameSize) }
 
   snapshot() { return this.buf.slice(0, this.frames * this.frameSize) }
 }

@@ -15,6 +15,9 @@ export default {
   objects: ['tube'],
   dropZ: 0.68,
   timeout: 60,
+  // three.js looks by MuJoCo material name (colors come from the MJCF) and visual overrides by geom name
+  materials: { tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 }, box: { roughness: 0.85 } },
+  geometry: { tube: { hollowCylinder: { wall: 0.002 } } }, // the physics has a matching ring of thin boxes
 
   randomize(rng) {
     const u = (lo, hi) => lo + (hi - lo) * rng()

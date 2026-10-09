@@ -28,8 +28,7 @@ export async function loadScene(mj, readFile, { scene, timestep } = {}) {
     return data
   }
 
-  let xml = await read(scene)
-  if (timestep) xml = xml.replace(/timestep="[^"]*"/, `timestep="${timestep}"`)
+  const xml = await read(scene)
   const robot = await read(ROBOT)
   const meshFiles = src => [...new Set([...src.matchAll(MESH_FILE)].map(r => r[1]))]
   // The robot's compiler sets meshdir="meshes". Scene meshes live under public/models/objects/<name>/ and are
@@ -43,5 +42,6 @@ export async function loadScene(mj, readFile, { scene, timestep } = {}) {
   mj.FS.writeFile(`${VFS_ROOT}/g1_upper.xml`, robot)
   mj.FS.writeFile(`${VFS_ROOT}/scene.xml`, xml)
   const model = mj.MjModel.from_xml_path(`${VFS_ROOT}/scene.xml`)
+  if (timestep) model.opt.timestep = timestep // m.opt is a reference view: assignment writes through
   return { model, assets }
 }
