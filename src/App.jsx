@@ -2,12 +2,9 @@ import { useEffect } from 'react'
 import { Canvas } from '@react-three/fiber'
 import { createXRStore, XR } from '@react-three/xr'
 import * as THREE from 'three'
-import { Scene } from './components/Scene.jsx'
 import { MujocoScene } from './components/MujocoScene.jsx'
 import { onEpisodesChanged, exportEpisodes, clearEpisodes } from './sim/episodeStore.js'
-
-// ?legacy = the original kinematic (Rapier) scene without the MuJoCo task
-const LEGACY = new URLSearchParams(location.search).has('legacy')
+import { TASKS, DEFAULT_TASK } from './sim/tasks/index.js'
 
 const xrStore = createXRStore({
   hand: { model: false },
@@ -22,22 +19,23 @@ export default function App() {
   useEffect(() => {
     const btn = document.getElementById('enter-vr')
     const status = document.getElementById('status')
-    const instructions = document.querySelector('#instructions')
+    const instructions = document.getElementById('instructions')
     if (!btn) return
 
     if (!navigator.xr) {
       btn.textContent = 'WebXR N/A'
       btn.disabled = true
-      if (status) status.textContent = 'Use Meta Quest 3 Browser'
+      if (status) status.textContent = 'Use the Meta Quest browser'
       return
     }
+    if (instructions) instructions.textContent = `Open ${location.origin}${location.pathname} in the Meta Quest browser and allow hand tracking`
 
     navigator.xr.isSessionSupported('immersive-vr').then((supported) => {
       if (!supported) {
         btn.style.opacity = '0.5'
-        if (status) status.textContent = 'Open on Meta Quest 3 browser'
+        if (status) status.textContent = 'Open on a Meta Quest browser'
       } else {
-        if (status) status.textContent = 'Quest 3 Ready'
+        if (status) status.textContent = 'Quest ready'
         if (instructions) instructions.style.display = 'none'
       }
     })
@@ -52,7 +50,13 @@ export default function App() {
     const select = document.getElementById('task')
     if (!select) return
     const params = new URLSearchParams(location.search)
-    if (params.get('task')) select.value = params.get('task')
+    select.replaceChildren(...Object.values(TASKS).map(t => {
+      const option = document.createElement('option')
+      option.value = t.name
+      option.textContent = t.title ?? t.instruction
+      return option
+    }))
+    select.value = TASKS[params.get('task')] ? params.get('task') : DEFAULT_TASK
     const onChange = () => {
       params.set('task', select.value)
       location.search = params.toString()
@@ -63,7 +67,7 @@ export default function App() {
 
   useEffect(() => {
     const row = document.getElementById('episodes')
-    if (LEGACY || !row) return
+    if (!row) return
     row.hidden = false
     const count = document.getElementById('episode-count')
     const download = document.getElementById('download-episodes')
@@ -76,7 +80,7 @@ export default function App() {
       const url = URL.createObjectURL(await exportEpisodes())
       const a = document.createElement('a')
       a.href = url
-      a.download = `tube_box_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
+      a.download = `iamr_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.iamr`
       a.click()
       setTimeout(() => URL.revokeObjectURL(url), 10000)
     }
@@ -97,9 +101,9 @@ export default function App() {
         antialias: true,
         alpha: false,
         powerPreference: 'high-performance',
-        toneMapping: LEGACY ? THREE.NoToneMapping : THREE.ACESFilmicToneMapping,
+        toneMapping: THREE.ACESFilmicToneMapping,
       }}
-      shadows={LEGACY ? false : 'percentage'}
+      shadows="percentage"
       camera={{
         fov: 75,
         near: 0.01,
@@ -109,7 +113,7 @@ export default function App() {
     >
       <color attach="background" args={['#607080']} />
       <XR store={xrStore}>
-        {LEGACY ? <Scene /> : <MujocoScene />}
+        <MujocoScene />
       </XR>
     </Canvas>
   )

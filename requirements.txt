@@ -1,0 +1,5 @@
+# Offline tools (scripts/*.py)
+numpy>=1.26
+trimesh>=4.0
+coacd>=1.0
+fast-simplification>=0.1

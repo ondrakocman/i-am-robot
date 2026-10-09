@@ -1,4 +1,5 @@
 import * as THREE from 'three'
+import { smoothingAlpha } from './Smoothing.js'
 
 const _v0 = new THREE.Vector3()
 const _v1 = new THREE.Vector3()
@@ -20,27 +21,27 @@ function measureJointBend(A, B, C) {
 }
 
 /**
- * Maps Quest 3 hand joints to normalized Dex 3.1 curl/abduction factors.
- * Output is 0-1 normalized; the caller maps to actual URDF joint limits.
+ * Maps Quest 3 hand joints to normalized Dex3 finger commands: thumb abduction in [-1, 1], curls in [0, 1].
+ * The caller maps these to the URDF joint ranges. Ring and pinky are ignored (the Dex3 has no counterpart).
  */
 export function retargetHand(joints) {
   const result = {
-    thumb:  { abduction: 0, curl: [0, 0] },
-    index:  { curl: [0, 0] },
+    thumb: { abduction: 0, curl: [0, 0] },
+    index: { curl: [0, 0] },
     middle: { curl: [0, 0] },
   }
   if (!joints) return result
 
   const get = (name) => joints[name]?.position
 
-  const wrist     = get('wrist')
+  const wrist = get('wrist')
   const thumbMeta = get('thumb-metacarpal')
   const thumbProx = get('thumb-phalanx-proximal')
   const thumbDist = get('thumb-phalanx-distal')
-  const thumbTip  = get('thumb-tip')
+  const thumbTip = get('thumb-tip')
   const indexMeta = get('index-finger-metacarpal')
   const indexProx = get('index-finger-phalanx-proximal')
-  const indexTip  = get('index-finger-tip')
+  const indexTip = get('index-finger-tip')
   const middleMeta = get('middle-finger-metacarpal')
 
   // Thumb abduction: angle between thumb bone and index bone directions
@@ -50,24 +51,22 @@ export function retargetHand(joints) {
     const angle = Math.acos(clamp(_v0.dot(_v1), -1, 1))
     result.thumb.abduction = clamp((angle - 0.9) / 0.65, -1, 1)
 
-    // Thumb curl: direct joint bend measurement (×1.5 compensates for thumb's smaller flex range)
+    // Thumb curl: direct joint bend measurement (x1.5 compensates for the thumb's smaller flex range)
     result.thumb.curl[0] = clamp(measureJointBend(thumbMeta, thumbProx, thumbDist) * 1.5, 0, 1)
     result.thumb.curl[1] = clamp(measureJointBend(thumbProx, thumbDist, thumbTip) * 1.5, 0, 1)
   }
 
-  // Index finger
-  const indexMid  = get('index-finger-phalanx-intermediate')
+  const indexMid = get('index-finger-phalanx-intermediate')
   const indexDist = get('index-finger-phalanx-distal')
   if (indexMeta && indexProx && indexMid && indexDist && indexTip) {
     result.index.curl[0] = measureCurl(indexMeta, indexProx, indexTip)
     result.index.curl[1] = measureJointBend(indexMid, indexDist, indexTip)
   }
 
-  // Middle finger
   const middleProx = get('middle-finger-phalanx-proximal')
-  const middleMid  = get('middle-finger-phalanx-intermediate')
+  const middleMid = get('middle-finger-phalanx-intermediate')
   const middleDist = get('middle-finger-phalanx-distal')
-  const middleTip  = get('middle-finger-tip')
+  const middleTip = get('middle-finger-tip')
   if (middleMeta && middleProx && middleMid && middleDist && middleTip) {
     result.middle.curl[0] = measureCurl(middleMeta, middleProx, middleTip)
     result.middle.curl[1] = measureJointBend(middleMid, middleDist, middleTip)
@@ -76,30 +75,29 @@ export function retargetHand(joints) {
   return result
 }
 
+/** First-order smoothing of the finger commands; the thumb rotation is smoothed harder (it is the noisiest). */
 export class RetargetingFilter {
-  constructor(alpha = 0.3) {
-    this.alpha = alpha
+  constructor(tau = 0.03, thumbTau = 0.08) {
+    this.tau = tau
+    this.thumbTau = thumbTau
     this.last = null
   }
 
-  update(raw) {
+  update(raw, dt) {
     if (!this.last) {
       this.last = {
-        thumb:  { abduction: raw.thumb.abduction, curl: [...raw.thumb.curl] },
-        index:  { curl: [...raw.index.curl] },
+        thumb: { abduction: raw.thumb.abduction, curl: [...raw.thumb.curl] },
+        index: { curl: [...raw.index.curl] },
         middle: { curl: [...raw.middle.curl] },
       }
       return this.last
     }
-
-    const a = this.alpha
+    const a = smoothingAlpha(this.tau, dt)
     const lerp = (prev, next) => prev + (next - prev) * a
-
-    this.last.thumb.abduction += (raw.thumb.abduction - this.last.thumb.abduction) * a * 0.4
-    this.last.thumb.curl  = raw.thumb.curl.map((v, i)  => lerp(this.last.thumb.curl[i],  v))
-    this.last.index.curl  = raw.index.curl.map((v, i)  => lerp(this.last.index.curl[i],  v))
+    this.last.thumb.abduction += (raw.thumb.abduction - this.last.thumb.abduction) * smoothingAlpha(this.thumbTau, dt)
+    this.last.thumb.curl = raw.thumb.curl.map((v, i) => lerp(this.last.thumb.curl[i], v))
+    this.last.index.curl = raw.index.curl.map((v, i) => lerp(this.last.index.curl[i], v))
     this.last.middle.curl = raw.middle.curl.map((v, i) => lerp(this.last.middle.curl[i], v))
-
     return this.last
   }
 

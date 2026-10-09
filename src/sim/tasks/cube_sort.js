@@ -1,18 +1,25 @@
 // Cube sorting: six printed PLA cubes, two of each colour, into the matching bins.
 
 const CUBES = ['red', 'red', 'green', 'green', 'blue', 'blue']
-const SLOTS = [[0.26, 0.06], [0.33, 0.06], [0.26, -0.06], [0.33, -0.06], [0.295, 0.14], [0.295, -0.14]]
-const CUBE_Z = 0.816
-const JITTER = 0.012
+const CUBE_HALF = 0.025
+const CUBE_Z = 0.79 + CUBE_HALF + 0.001
+// Spawn slots on the table in front of the robot, clear of the bins (green bin starts at x=0.39): a 2 x 3 grid
+// 9 x 12 cm apart with +-8 mm jitter keeps centres > 7.4 cm apart, more than a yawed cube's diagonal (7.1 cm)
+const SLOT_X = [0.24, 0.33]
+const SLOT_Y = [-0.12, 0, 0.12]
+const JITTER = 0.008
+const YAW_JITTER = 0.8
 const BIN_INNER = [0.09, 0.07]   // bin interior half extents minus a margin (bin is 0.22 x 0.18 outside)
 const BIN_MAX_Z = 0.86           // cube centre must be below the bin rim (0.87)
 
-function shuffle(arr, rng) {
-  for (let i = arr.length - 1; i > 0; i--) {
+/** The six slots in random order, each jittered. */
+function samplePositions(rng) {
+  const slots = SLOT_X.flatMap(x => SLOT_Y.map(y => [x, y]))
+  for (let i = slots.length - 1; i > 0; i--) {
     const j = Math.floor(rng() * (i + 1));
-    [arr[i], arr[j]] = [arr[j], arr[i]]
+    [slots[i], slots[j]] = [slots[j], slots[i]]
   }
-  return arr
+  return slots.map(([x, y]) => [x + (rng() * 2 - 1) * JITTER, y + (rng() * 2 - 1) * JITTER])
 }
 
 export default {
@@ -30,11 +37,10 @@ export default {
   },
 
   reset(sim, rng) {
-    const slots = shuffle(SLOTS.slice(), rng)
+    const positions = samplePositions(rng)
     const cubes = CUBES.map((color, i) => {
-      const [sx, sy] = slots[i]
-      const pos = [sx + (rng() * 2 - 1) * JITTER, sy + (rng() * 2 - 1) * JITTER, CUBE_Z]
-      const yaw = (rng() * 2 - 1) * 0.8
+      const pos = [positions[i][0], positions[i][1], CUBE_Z]
+      const yaw = (rng() * 2 - 1) * YAW_JITTER
       sim.placeObject(i, pos, yaw)
       return { color, pos, yaw }
     })
@@ -59,7 +65,7 @@ export default {
     const count = { red: 0, green: 0, blue: 0 }
     CUBES.forEach((color, i) => {
       const [bx, by, bz] = sim.layout.bins[color]
-      sim.teleportObject(i, [bx + (count[color]++ ? 0.04 : -0.04), by, bz + 0.002 + 0.025 + 0.002])
+      sim.teleportObject(i, [bx + (count[color]++ ? 0.04 : -0.04), by, bz + 0.002 + CUBE_HALF + 0.002])
     })
   },
 }

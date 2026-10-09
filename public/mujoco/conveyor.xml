@@ -270,16 +270,16 @@
       <geom name="tag1" class="label" size="0.035 0.025 0.001" pos="0 0 0.031" material="tag"/>
       <geom name="tagbar1" class="label" size="0.0245 0.0087 0.0005" pos="0 0 0.0325" material="tagbar"/>
     </body>
-    <body name="package2" pos="-3.6 0 0.026000000000000002">
+    <body name="package2" pos="-3.6 0 0.026">
       <freejoint name="package2_free"/>
       <geom name="package2" class="touchable" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
-      <geom name="tag2" class="label" size="0.035 0.025 0.001" pos="0 0 0.026000000000000002" material="tag"/>
+      <geom name="tag2" class="label" size="0.035 0.025 0.001" pos="0 0 0.026" material="tag"/>
       <geom name="tagbar2" class="label" size="0.0245 0.0087 0.0005" pos="0 0 0.0275" material="tagbar"/>
     </body>
-    <body name="package3" pos="-3.9 0 0.026000000000000002">
+    <body name="package3" pos="-3.9 0 0.026">
       <freejoint name="package3_free"/>
       <geom name="package3" class="touchable" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
-      <geom name="tag3" class="label" size="0.035 0.025 0.001" pos="0 0 0.026000000000000002" material="tag"/>
+      <geom name="tag3" class="label" size="0.035 0.025 0.001" pos="0 0 0.026" material="tag"/>
       <geom name="tagbar3" class="label" size="0.0245 0.0087 0.0005" pos="0 0 0.0275" material="tagbar"/>
     </body>
     <body name="package4" pos="-4.2 0 0.041">

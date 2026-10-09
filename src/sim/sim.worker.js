@@ -1,5 +1,5 @@
 // Physics worker: runs MuJoCo (WASM) in real time off the render thread.
-//   main -> worker: init, input (operator hands, every XR frame), reset
+//   main -> worker: init, input (operator hands, every XR frame), abort (XR session ended)
 //   worker -> main: ready (scene description for rendering), state (body poses ~120 Hz), episode, error
 
 import loadMujoco from '@mujoco/mujoco'
@@ -9,23 +9,39 @@ import { getTask } from './tasks/index.js'
 import { encodeEpisode } from './episode.js'
 
 const TICK_MS = 4
-const MAX_CATCHUP_MS = 20   // per tick; beyond this the sim runs slower than real time instead of freezing
+const MAX_CATCHUP_MS = 20     // per tick; beyond this the sim runs slower than real time instead of freezing
 const POST_INTERVAL_MS = 8
+const INPUT_TIMEOUT_MS = 150  // no input message for this long (headset off, tab hidden) = hands untracked
 
 let mj = null
 let sim = null
 let owed = 0
 let lastTick = 0
 let lastPost = 0
+let lastInput = -Infinity
+let bodies = null             // reused between posts when the previous buffer has been returned
 const perf = { windowStart: 0, simTime: 0, stepMs: 0, steps: 0, rtf: 1, msPerStep: 0 }
 
 self.onmessage = ({ data: msg }) => {
-  if (msg.type === 'init') init(msg).catch(err => self.postMessage({ type: 'error', message: String(err?.stack ?? err) }))
-  else if (msg.type === 'input') sim?.setInput(msg.input, msg.raw)
-  else if (msg.type === 'reset') sim?.requestReset()
+  switch (msg.type) {
+    case 'init':
+      init(msg).catch(err => self.postMessage({ type: 'error', message: String(err?.stack ?? err) }))
+      break
+    case 'input':
+      sim?.setInput(msg.input, msg.raw)
+      lastInput = performance.now()
+      break
+    case 'abort':
+      sim?.abort()
+      sim?.clearInput()
+      break
+    case 'state-buffer':
+      bodies = msg.bodies
+      break
+  }
 }
 
-async function init({ baseUrl, timestep, autopilot, session, task: taskName }) {
+async function init({ baseUrl, timestep, autopilot, session, task: taskName, appVersion }) {
   const task = getTask(taskName)
   mj = await loadMujoco()
   const readFile = async path => {
@@ -33,10 +49,10 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName }) {
     if (!res.ok) throw new Error(`fetch ${path}: ${res.status}`)
     return path.endsWith('.xml') ? res.text() : new Uint8Array(await res.arrayBuffer())
   }
-  const m = await loadScene(mj, readFile, { scene: task.scene, timestep })
+  const { model: m, assets } = await loadScene(mj, readFile, { scene: task.scene, timestep })
   sim = new TaskSim(mj, m, task, {
     autopilot,
-    meta: { session, mujoco: __MUJOCO_VERSION__, model: 'public/' + task.scene, autopilot },
+    meta: { session, app_version: appVersion, mujoco: __MUJOCO_VERSION__, assets },
     onEpisode: ({ header, frames }) => {
       const buffer = encodeEpisode(header, frames)
       self.postMessage({ type: 'episode', header, buffer }, [buffer])
@@ -48,7 +64,7 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName }) {
     type: 'ready',
     scene,
     eye: sim.eyePosition(),
-    task: { name: task.name, instruction: task.instruction, title: task.title ?? task.instruction, objects: task.objects, resetButton: COMMON.resetButton, resetHold: COMMON.resetHold },
+    task: { name: task.name, instruction: task.instruction, title: task.title ?? task.instruction, objects: task.objects, resetButton: COMMON.resetButton },
     timestep: sim.dt,
   }, transfer)
   lastTick = perf.windowStart = performance.now()
@@ -59,6 +75,7 @@ function tick() {
   const now = performance.now()
   owed = Math.min(owed + (now - lastTick) / 1000, 0.1)
   lastTick = now
+  if (now - lastInput > INPUT_TIMEOUT_MS) sim.clearInput()
 
   if (sim.status === 'waiting') {
     sim.step() // physics frozen; just polls input and the reset button
@@ -82,31 +99,32 @@ function tick() {
     perf.msPerStep = perf.steps ? perf.stepMs / perf.steps : 0
     perf.windowStart = now
     perf.simTime = perf.stepMs = perf.steps = 0
+    sim.reportRealtime(perf.rtf)
   }
 
   if (now - lastPost >= POST_INTERVAL_MS) {
     lastPost = now
-    const bodies = sim.writeBodies(new Float32Array(7 * sim.m.nbody))
+    const out = sim.writeBodies(bodies ?? new Float32Array(7 * sim.m.nbody))
+    bodies = null
     self.postMessage({
       type: 'state',
-      bodies,
+      bodies: out,
       info: {
         status: sim.status,
         episode: sim.episode,
         elapsed: sim.status === 'waiting' ? 0 : (sim.status === 'running' ? sim.d.time : sim.endTime) - sim.startTime,
         touching: [sim.touching[0], sim.touching[1]],
         resetProgress: Math.min(1, sim.resetTimer / COMMON.resetHold),
-        goalMet: sim.goalMet,
         taskLine: sim.task.hud ? sim.task.hud(sim) : '',
         rtf: perf.rtf,
         msPerStep: perf.msPerStep,
       },
-    }, [bodies.buffer])
+    }, [out.buffer])
   }
 }
 
 // Everything the main thread needs to draw the model: bodies, visible geoms (robot collision meshes in
-// group 3 and sites are skipped) and the mesh data they reference.
+// group 3 and sites are skipped) with their MuJoCo material names, and the mesh data they reference.
 function describeScene(m) {
   const name = (type, i) => mj.mj_id2name(m, mj.mjtObj[type].value, i) ?? ''
   const MESH = mj.mjtGeom.mjGEOM_MESH.value
@@ -140,6 +158,7 @@ function describeScene(m) {
       pos: Array.from(m.geom_pos.slice(3 * g, 3 * g + 3)),
       quat: Array.from(m.geom_quat.slice(4 * g, 4 * g + 4)),
       rgba,
+      material: mat >= 0 ? name('mjOBJ_MATERIAL', mat) : '',
       mesh,
     })
   }

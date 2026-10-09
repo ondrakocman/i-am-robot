@@ -1,6 +1,10 @@
-// Headless check of a task: runs its scripted autopilot through TaskSim in Node and reports whether the
-// episodes succeed, plus step cost. Also verifies that a recorded episode replays bit-for-bit from its log.
-//   node scripts/sim-check.mjs [task=tube_box] [dt=0.002] [n=3]
+// Headless check of a task, used as the CI gate (non-zero exit on any failure):
+//   1. resets over several seeds start from physically valid states (no object penetration)
+//   2. episodes succeed: tasks with a scripted demonstration run it; others teleport the objects into the
+//      solved configuration (on a frame boundary, so it is a logged event) and goal detection must fire
+//   3. every episode replays bit-for-bit (qpos and qvel) from its header + actions + events
+//   4. MuJoCo raised no warnings (instability, constraint overflow)
+//   node scripts/sim-check.mjs [task=tube_box] [dt=0.002] [n=3] [seeds=25]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
 import path from 'node:path'
@@ -8,69 +12,74 @@ import { fileURLToPath } from 'node:url'
 import { loadScene } from '../src/sim/loadScene.js'
 import { TaskSim } from '../src/sim/TaskSim.js'
 import { getTask } from '../src/sim/tasks/index.js'
+import { applyPhysics, compiledPhysics, replayEpisode } from '../src/sim/replay.js'
 
 const PUBLIC = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', 'public')
+const MAX_PENETRATION = 0.002 // m: contact softness allows ~1 mm at rest; anything deeper is a bad reset
+const SOLVE_AT_S = 2
+
 const args = Object.fromEntries(process.argv.slice(2).map(a => a.includes('=') ? a.split('=') : ['task', a]))
 const task = getTask(args.task)
 const timestep = Number(args.dt ?? 0.002)
 const runs = Number(args.n ?? 3)
+const seeds = Number(args.seeds ?? 25)
+let failures = 0
+const fail = msg => { failures++; console.error('FAIL:', msg) }
 
 const mj = await loadMujoco()
 const readFile = async p => (p.endsWith('.xml') ? fs.readFile(path.join(PUBLIC, p), 'utf8') : new Uint8Array(await fs.readFile(path.join(PUBLIC, p))))
-const m = await loadScene(mj, readFile, { scene: task.scene, timestep })
+const { model: m } = await loadScene(mj, readFile, { scene: task.scene, timestep })
+const base = compiledPhysics(m) // before anything randomizes the model, like the headset's fresh load
+// d.warning is a reference view into MjData (unlike d.contact): read it, never delete it
+const warningCount = d => { const w = d.warning; let n = 0; for (let i = 0; i < w.size(); i++) n += w.get(i).number; return n }
+console.log(`task ${task.name}  timestep ${timestep}  nq=${m.nq} nv=${m.nv} nu=${m.nu} nbody=${m.nbody}`)
 
+// 1. episodes (the recording sim is built on the fresh model, as on the headset)
 const episodes = []
 const sim = new TaskSim(mj, m, task, { seed: 7, autopilot: true, onEpisode: e => episodes.push(e) })
-console.log(`task ${task.name}  timestep ${sim.dt}  control ${1 / sim.controlDt} Hz  nq=${m.nq} nv=${m.nv} nu=${m.nu} nbody=${m.nbody}`)
 if (!task.autopilot) console.log('no scripted demonstration for this task: checking goal detection from the solved configuration')
-
 const t0 = performance.now()
 let steps = 0
-let solvedAt = 0
+let solvedFor = 0
 while (episodes.length < runs && steps < runs * (task.timeout + 5) / sim.dt) {
   if (!task.autopilot && sim.status === 'waiting') {
-    // start the episode with a "tracked" idle hand; 2 s in, teleport the objects into the goal (on a frame
-    // boundary, so the logged event replays exactly)
+    // a "tracked" idle hand starts the episode; SOLVE_AT_S in, the objects are teleported into the goal
     sim.input.fill(0); sim.input[0] = 1; sim.input.set([...sim.readyGrip[0], 1, 0, 0, 0], 1)
-    if (solvedAt !== sim.episode) { sim.scheduleAtFrame(Math.round(2 / sim.controlDt), () => task.solved(sim)); solvedAt = sim.episode }
+    if (solvedFor !== sim.episode) { sim.scheduleAtFrame(Math.round(SOLVE_AT_S / sim.controlDt), () => task.solved(sim)); solvedFor = sim.episode }
   }
   sim.step()
   steps++
 }
 const ms = (performance.now() - t0) / steps
 console.log(`${steps} steps, ${ms.toFixed(3)} ms/step (${(ms / (sim.dt * 1000) * 100).toFixed(0)}% of real time on one core)`)
+const warnings = warningCount(sim.d)
+if (warnings) fail(`MuJoCo raised ${warnings} warnings`)
+if (episodes.length < runs) fail(`only ${episodes.length}/${runs} episodes finished`)
 for (const e of episodes) {
   const h = e.header
   const phys = Object.entries(h.physics).map(([k, v]) => `${k} ${v.mass.toFixed(2)}kg/mu${v.friction.toFixed(2)}`).join(' ')
   console.log(`episode ${h.episode}: ${h.outcome} after ${h.duration.toFixed(2)} s, ${h.frames} frames, peak arm ${h.peak_arm_velocity.toFixed(1)} rad/s${h.flags.length ? ' FLAGS ' + h.flags : ''}${h.events.length ? `, ${h.events.length} events` : ''}${h.result ? ' ' + JSON.stringify(h.result) : ''}\n    ${phys}`)
+  if (h.outcome !== 'success') fail(`episode ${h.episode} ended with ${h.outcome}`)
 }
 
-// Replay check: initial qpos + logged float32 actions must reproduce the logged qpos exactly
-const e = episodes[0]
-if (e) {
-  const { header, frames } = e
-  const f = Object.fromEntries(header.fields.map(x => [x.name, x]))
-  const d = new mj.MjData(m)
-  sim.setPhysics(header.physics)
-  d.qpos.set(header.initial_qpos)
-  d.ctrl.set(header.initial_ctrl)
-  const q32 = new Float32Array(header.nq)
-  let mismatch = -1
-  const replayFrames = header.frames
-  let ev = 0
-  for (let i = 0; i < replayFrames && mismatch < 0; i++) {
-    const o = i * header.frame_size
-    q32.set(d.qpos) // each frame logs the state at its control tick, before that tick's steps
-    for (let k = 0; k < header.nq; k++) if (q32[k] !== frames[o + f.qpos.offset + k]) { mismatch = i; break }
-    // logged teleports (spawns) come after the frame they are tagged with, before the steps to the next one
-    for (; ev < header.events.length && header.events[ev].tick === i; ev++) {
-      const e = header.events[ev]
-      d.qpos.set(e.qpos, e.qpos_adr)
-      d.qvel.fill(0, e.qvel_adr, e.qvel_adr + 6)
-    }
-    for (let a = 0; a < header.nu; a++) d.ctrl[a] = frames[o + f.action.offset + a]
-    for (let s = 0; s < header.steps_per_control; s++) mj.mj_step(m, d)
-  }
-  console.log(mismatch < 0 ? `replay: all ${replayFrames} frames match bit-for-bit` : `replay: diverged at frame ${mismatch}`)
-  d.delete()
+// 2. replay (fresh data, physics restored from the header, like a downstream consumer would)
+for (const { header, frames } of episodes) {
+  applyPhysics(mj, m, header, base)
+  const r = replayEpisode(mj, m, header, frames)
+  if (r.mismatch >= 0) fail(`episode ${header.episode} replay diverged at frame ${r.mismatch}`)
+  else console.log(`episode ${header.episode} replay: all ${r.frames} frames match bit-for-bit`)
 }
+
+// 3. reset validity over many seeds (each TaskSim re-randomizes the shared model; fine after the replays)
+let worst = 0
+for (let seed = 1; seed <= seeds; seed++) {
+  const probe = new TaskSim(mj, m, task, { seed })
+  worst = Math.max(worst, probe.maxObjectPenetration())
+  probe.d.delete(); probe.ikData.delete()
+}
+console.log(`reset check: deepest object penetration over ${seeds} seeds ${(worst * 1000).toFixed(2)} mm`)
+if (worst > MAX_PENETRATION) fail(`resets start interpenetrating (${(worst * 1000).toFixed(1)} mm > ${MAX_PENETRATION * 1000} mm)`)
+
+sim.d.delete(); sim.ikData.delete(); m.delete()
+if (failures) { console.error(`${failures} check(s) failed`); process.exit(1) }
+console.log('all checks passed')

@@ -1,77 +1,104 @@
 # I Am Robot
 
-Embodied VR teleoperation of a Unitree G1 + Dex3 in the Meta Quest 3 browser, for collecting imitation-learning
-demonstrations without a physical robot.
+Browser-based VR teleoperation of a Unitree G1 humanoid with Dex3 hands on a Meta Quest 3, for collecting
+imitation-learning demonstrations without a physical robot. Physics is MuJoCo (the official WebAssembly build)
+running in a Web Worker on the headset: a URL is the whole install, nothing leaves the device, and every episode
+replays bit-for-bit from its log.
 
-## Tasks (MuJoCo physics)
+Live: https://ondrakocman.github.io/i-am-robot/
 
-Physics is MuJoCo (official WASM build) running in a Web Worker on the headset. Pick the task on the landing page
-(or `?task=`):
+## How it works
+
+- You stand where the robot stands and see its arms and hands as your own. Quest hand tracking drives a
+  damped-least-squares IK to arm joint targets; thumb, index and middle finger curls are retargeted to the
+  Dex3's seven joints. The targets go to position actuators with the real robot's PD gains, so grasps obey the
+  real force limits and a blocked hand pushes with bounded force instead of whipping free.
+- Recording starts when your hands are tracked and ends on success, drop, timeout, or when you leave VR.
+  Episodes are stored in the headset browser; exit VR and press **Download** for one `.iamr` file.
+- Manual reset: hold a robot hand on the red sphere to your upper left. Robot fingers glow while they touch an
+  object. If the robot hand can't follow yours (blocked, out of reach), your real hand fades in as a skeleton.
+- The panel behind the table shows the recording state, saved-episode count and whether physics keeps up
+  (`1.00× real time`). If it drops, try `?dt=0.004`.
+
+## Tasks
+
+Pick the task on the landing page (or `?task=`):
 
 - **Tube into box** (`tube_box`), modeled on Isaac Lab's `PickPlace-FixedBaseUpperBodyIK-G1`: a hollow steel tube
   stands on the robot's left, the box sits on its right.
 - **Conveyor** (`conveyor`), in the spirit of the humanoid logistics demos: packages arrive on the left roller belt
   in a random orientation; turn each one shipping-tag up and set it on the right belt, which carries it away.
-  Five packages per episode, three sizes, randomized mass/friction/belt speed. The header scores each package
-  (`correct` / `wrong_face` / `dropped`).
-- **Cube sorting** (`cube_sort`): six printed PLA cubes, two of each colour, into the matching bins (your own bin
-  model, converted with `scripts/convert-object.py`).
+  Five packages per episode, three sizes, randomized mass, friction and belt speed; each package is scored
+  `correct` / `wrong_face` / `dropped`.
+- **Cube sorting** (`cube_sort`): six printed PLA cubes, two of each colour, into the matching bins (the bin is a
+  real model, converted with `scripts/convert-object.py`).
 
 Static tasks succeed when the goal holds with every object at rest and both hands off them for 0.5 s; the
 conveyor task ends when all packages have left the output belt. Then the episode is saved and the scene
-re-randomizes.
+re-randomizes (object placement, mass, friction, belt speed), all logged.
+
+Adding a task: one module in `src/sim/tasks/` (scene XML, object list, `reset`/`randomize`, `goal` or `update`,
+optional `solved` for the headless check) and a line in `tasks/index.js`.
+
+## Running it
 
 ```
 npm install
-npm run dev          # open https://<your-ip>:5173 in the Quest browser
+npm run dev          # https://<your-ip>:5173 in the Quest browser (self-signed certificate: accept it once)
+npm run check        # lint + headless task checks (the CI gate)
+npm run build
 ```
 
-- Recording starts when your hands are tracked and stops on success, drop or a 60 s timeout.
-- Manual reset: hold a robot hand on the red sphere to your upper left for ~0.6 s.
-- Robot fingers glow green while they touch the tube.
-- The floating panel shows the episode state and whether physics keeps up (`1.00×` real time).
-- Episodes are stored in the headset browser (IndexedDB). Exit VR and press **Download** to get one `.iamr` file.
+URL options: `?task=<name>`, `?dt=0.002|0.0025|0.004|0.005` (physics timestep; control stays at 50 Hz),
+`?autopilot` (scripted demo of the tube task, no headset needed), `?view=eye` (desktop preview from the robot's head).
 
-URL options: `?dt=0.004` (physics timestep, default 2 ms), `?autopilot` (scripted demo, no headset needed),
-`?view=eye` (desktop preview from the robot's head), `?legacy` (the original kinematic scene).
-
-### Data
+## Data
 
 ```
-python3 scripts/load_episodes.py episodes.iamr
+python3 scripts/load_episodes.py episodes.iamr      # numpy arrays per field (see the docstring for the layout)
+node scripts/replay.mjs episodes.iamr               # verifies every episode replays bit-for-bit
 ```
 
-Per episode, at 50 Hz: `action` (the 31 actuator targets: waist, 2x7 arm, 2x7 hand), `qpos`/`qvel` (full sim
-state including the objects), `input` (retargeted operator command), `raw` (head pose + all 25 WebXR joints per
-hand), `touching`. The header holds the task, layout, seed, outcome, joint/actuator names, `initial_qpos`, the
-randomized `physics` per object (mass, friction), `peak_arm_velocity` and `flags` (`fast_motion` above 6 rad/s).
-Dynamic tasks also log `events` (object teleports such as package spawns, tagged with the frame they follow) and
-`initial_ctrl` (belt motors); `robot_nu` says how many leading entries of `action` are the robot's. Each episode
-replays bit-for-bit from `initial_qpos` + `initial_ctrl` + `physics` + actions + events with the same MuJoCo build,
-so camera images can be rendered afterwards.
+Per episode, at 50 Hz: `action` (actuator targets; the first `robot_nu` are the robot's, in `actuator_names`
+order: waist ×3, then per arm 7 arm joints followed by 7 hand joints; the two hands list their fingers in
+different orders, so slice by name), `qpos`/`qvel` (full simulation state including the objects), `input`
+(retargeted operator command), `raw` (head pose and all 25 WebXR joints per hand, zero when untracked),
+`touching`. The header holds the task and its language instruction, layout, seed, outcome and per-task result,
+randomized `physics`, logged teleport `events`, initial and final state, `peak_arm_velocity` and `flags`
+(`fast_motion` above 6 rad/s), the real-time factor during the episode, SHA-256 hashes of every model file,
+and the app commit and MuJoCo version.
 
-### Fidelity choices
+Replay: `initial_qpos` + `initial_ctrl` + `physics` + actions + events reproduce `qpos`/`qvel` exactly with the
+same `@mujoco/mujoco` build (`src/sim/replay.js` is the reference). A renderer needs only the logged `qpos`, so
+camera images can be produced offline from any viewpoint with any renderer.
 
+What is collected: robot and object state, your head pose and hand skeleton at 50 Hz, and a random session id.
+Nothing is uploaded; the data stays in the headset until you download it. Hand and head motion are personal
+data, so get consent before sharing datasets recorded by others.
+
+## Fidelity choices
+
+- Robot model from [MuJoCo Menagerie](https://github.com/google-deepmind/mujoco_menagerie) (Unitree's G1
+  description, BSD-3), fixed base, legs static. Generated by `scripts/build-g1-mjcf.py`, meshes decimated by
+  `scripts/decimate-meshes.py` (630k → 195k triangles for the headset).
 - Joint PD gains are the ones Unitree's own teleop stack ([xr_teleoperate](https://github.com/unitreerobotics/xr_teleoperate))
   sends to the real G1: shoulder/elbow kp=80 kd=3, wrist kp=40 kd=1.5, waist kp=300 kd=3, Dex3 kp=1.5 kd=0.2.
-  Actuator force limits come from Unitree's model via MuJoCo Menagerie. Gravity is compensated on the arms.
-- Anti-windup: the commanded joint target may lead the measured joint by at most 0.12 rad, so a hand blocked by
-  the table pushes with a bounded force and does not whip when it comes free.
-- Contacts on the objects, table and containers use `solref="0.01 1"` (stiffer than MuJoCo's default 0.02), valid for all
-  supported timesteps (`?dt=` up to 0.005).
+  Actuator force limits come from Unitree's model. Gravity is compensated on the arms.
+- Dex3 finger joints use frictionloss 0.01 and armature 0.0005 instead of Menagerie's body-wide 0.3 / 0.01: with
+  kp=1.5 the original friction swallowed every command below ~0.2 rad.
+- Anti-windup: a commanded joint target may lead the measured joint by at most 0.12 rad.
+- Contacts on objects, table and containers use `solref="0.01 1"` (stiffer than MuJoCo's default 0.02), valid for
+  every supported timestep. Actions are stored as float32 and applied as float32, which is what makes replay exact.
 
-### Development
+## Repository
 
-- `npm run sim-check [task] [dt=0.002] [n=3]`: headless check in Node. Tasks with a scripted demonstration
-  (`tube_box`) run it and must succeed; others teleport the objects into the solved configuration and goal
-  detection must fire. Both verify bit-exact replay (including logged spawn/teleport events) and report the step
-  cost. The scripted hand only manages round objects: the open Dex3 thumb blocks a sideways approach to a box, and
-  a pitched-down palm is 2–4 cm off everywhere on this table for the G1 arm.
-- `scripts/convert-object.py <mesh> <name>`: turns an STL/OBJ/GLB into a visual mesh plus a CoACD convex
-  decomposition for collision (containers keep their cavities), under `public/models/objects/<name>/`.
-- `scripts/build-conveyor-scene.py`: generates the conveyor scene (roller pitch, package pool).
-- `src/sim/TaskSim.js`: IK → joint targets, finger retargeting, task loop, recording (shared by the worker and Node).
-- `src/sim/tasks/*.js`: one module per task (scene, objects, reset/randomization, goal, optional scripted demo).
-- `public/mujoco/g1_upper.xml` is generated from MuJoCo Menagerie by `scripts/build-g1-mjcf.py` (fixed base, legs
-  as static visuals, gravity compensation, real PD gains, palm/grip/eye sites).
-- `public/mujoco/*.xml`: task scenes.
+- `src/sim/TaskSim.js` IK, finger retargeting, task loop, recording (runs in the worker and in Node)
+- `src/sim/sim.worker.js` real-time stepping off the render thread; `src/components/MujocoScene.jsx` rendering,
+  hand tracking, calibration, HUD
+- `src/sim/tasks/` task modules; `public/mujoco/` scenes; `public/models/` meshes
+- `scripts/sim-check.mjs` headless gate (reset validity, task success, bit-exact replay, MuJoCo warnings);
+  `scripts/replay.mjs`; `scripts/load_episodes.py`
+- `scripts/build-g1-mjcf.py`, `scripts/build-conveyor-scene.py`, `scripts/decimate-meshes.py`,
+  `scripts/convert-object.py` regenerate every generated asset (`pip install -r requirements.txt`)
+
+License: MIT (see `LICENSE`); third-party assets in `THIRD_PARTY.md`.

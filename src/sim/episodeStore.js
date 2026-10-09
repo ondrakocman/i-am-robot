@@ -15,41 +15,55 @@ function db() {
   return dbPromise
 }
 
+// Resolves when the transaction has committed; quota and commit failures surface as `abort`, not `error`
 function run(mode, fn) {
   return db().then(d => new Promise((resolve, reject) => {
     const tx = d.transaction(STORE, mode)
     const req = fn(tx.objectStore(STORE))
     tx.oncomplete = () => resolve(req?.result)
-    tx.onerror = () => reject(tx.error)
+    tx.onerror = () => reject(tx.error ?? new Error('IndexedDB transaction failed'))
+    tx.onabort = () => reject(tx.error ?? new Error('IndexedDB transaction aborted'))
   }))
 }
 
 const listeners = new Set()
-const notify = () => countEpisodes().then(stats => listeners.forEach(fn => fn(stats)))
+let stats = null
+async function refreshStats() {
+  const all = await run('readonly', s => s.getAll())
+  stats = { total: all.length, success: all.filter(e => e.success).length }
+  listeners.forEach(fn => fn(stats))
+  return stats
+}
 
+/** Calls fn with { total, success } now and after every change. */
 export function onEpisodesChanged(fn) {
   listeners.add(fn)
-  countEpisodes().then(fn)
+  if (stats) fn(stats)
+  else refreshStats().catch(err => console.error('[episodes]', err))
   return () => listeners.delete(fn)
 }
 
+/** True if the browser granted persistent storage (otherwise it may evict the episodes under pressure). */
+export async function requestPersistence() {
+  if (!navigator.storage?.persist) return false
+  return (await navigator.storage.persisted()) || navigator.storage.persist()
+}
+
+/** Resolves once the episode is committed to disk; rejects (e.g. quota exceeded) otherwise. */
 export async function saveEpisode(header, buffer) {
-  navigator.storage?.persist?.()
-  await run('readwrite', s => s.add({ header, success: header.success, data: new Blob([buffer]) }))
-  notify()
+  await run('readwrite', s => s.add({ header, success: header.success, task: header.task, data: new Blob([buffer]) }))
+  if (stats) {
+    stats = { total: stats.total + 1, success: stats.success + (header.success ? 1 : 0) }
+    listeners.forEach(fn => fn(stats))
+  }
 }
 
-export async function countEpisodes() {
+export async function exportEpisodes() {
   const all = await run('readonly', s => s.getAll())
-  return { total: all.length, success: all.filter(e => e.success).length }
-}
-
-export async function exportEpisodes({ successOnly = false } = {}) {
-  const all = await run('readonly', s => s.getAll())
-  return new Blob(all.filter(e => !successOnly || e.success).map(e => e.data), { type: 'application/octet-stream' })
+  return new Blob(all.map(e => e.data), { type: 'application/octet-stream' })
 }
 
 export async function clearEpisodes() {
   await run('readwrite', s => s.clear())
-  notify()
+  await refreshStats()
 }

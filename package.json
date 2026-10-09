@@ -1,28 +1,41 @@
 {
   "name": "i-am-robot",
   "version": "1.0.0",
+  "description": "Browser VR teleoperation of a Unitree G1 + Dex3 on Meta Quest 3 with on-device MuJoCo physics, for collecting imitation-learning demonstrations",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ondrakocman/i-am-robot.git"
+  },
   "private": true,
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "vite --host 0.0.0.0",
     "build": "vite build",
     "preview": "vite preview --host 0.0.0.0",
-    "sim-check": "node scripts/sim-check.mjs"
+    "lint": "eslint .",
+    "sim-check": "node scripts/sim-check.mjs",
+    "check": "npm run lint && node scripts/sim-check.mjs tube_box n=1 && node scripts/sim-check.mjs conveyor n=1 && node scripts/sim-check.mjs cube_sort n=1"
   },
   "dependencies": {
-    "@mujoco/mujoco": "^3.15.0",
+    "@mujoco/mujoco": "3.15.0",
     "@react-three/fiber": "^8.18.0",
-    "@react-three/rapier": "^1.5.0",
     "@react-three/xr": "^6.6.17",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "three": "^0.170.0",
-    "urdf-loader": "^0.12.6",
     "zustand": "^5.0.11"
   },
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@vitejs/plugin-basic-ssl": "^1.2.0",
     "@vitejs/plugin-react": "^4.3.4",
+    "eslint": "^10.12.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "globals": "^17.13.0",
     "vite": "^6.0.5"
   }
 }

@@ -3,11 +3,11 @@ import { useFrame, useThree } from '@react-three/fiber'
 import * as THREE from 'three'
 import { RoomEnvironment } from 'three/examples/jsm/environments/RoomEnvironment.js'
 import { retargetHand, RetargetingFilter } from '../systems/HandRetargeting.js'
-import { QuaternionSmoother } from '../systems/ImpedanceControl.js'
+import { QuaternionSmoother } from '../systems/Smoothing.js'
 import { OneEuroVector3 } from '../systems/OneEuroFilter.js'
 import { XR_JOINT_NAMES, ROBOT_BASE_QUAT, XR_TO_URDF_L, XR_TO_URDF_R } from '../constants/kinematics.js'
 import { HAND_INPUT, INPUT_SIZE, RAW_SIZE } from '../sim/TaskSim.js'
-import { saveEpisode, onEpisodesChanged } from '../sim/episodeStore.js'
+import { saveEpisode, onEpisodesChanged, requestPersistence } from '../sim/episodeStore.js'
 
 const params = new URLSearchParams(location.search)
 const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
@@ -21,24 +21,27 @@ const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
 const DARK_MESH = /^(head_link|logo_link)$|_hand_palm_link$/   // palm mesh hangs off the (silver) wrist body
 const ROBOT_BODY = /_link$|^pelvis$/
 const PAD_BODY = /_hand_(thumb_2|index_1|middle_1)_link$/
-// Visible room around the robot (robot frame: x forward, z up); visual only, nothing collides with it
-// The box bottom sits 2 cm under the MuJoCo floor plane so the two don't z-fight.
-const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.43], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.87] }
 const SHADOW_CASTER_BODY = /elbow|wrist|hand/
-const SCENE_MATERIALS = {               // by geom-name prefix
+// Surface look per MuJoCo material name (colors come from the MJCF); anything else is a matte default
+const MATERIAL_LOOK = {
   floor: { roughness: 0.95 },
-  table_top: { roughness: 0.75 },
-  box: { roughness: 0.85 },                              // matte plastic
-  bin: { roughness: 0.8 },
-  tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 }, // brushed steel
-  package: { roughness: 0.95 },                          // cardboard
+  table: { roughness: 0.75 },
+  table_leg: { roughness: 0.8 },
+  box: { roughness: 0.85 },                                 // matte plastic
+  tube: { color: 0xb4b8bd, roughness: 0.32, metalness: 1 },  // brushed steel
+  cardboard: { roughness: 0.95 },
   tag: { roughness: 0.6 },
+  tagbar: { roughness: 0.6 },
   roller: { roughness: 0.4, metalness: 0.6 },
   rail: { roughness: 0.45, metalness: 0.7 },
+  leg: { roughness: 0.6, metalness: 0.5 },
   stop: { roughness: 0.6 },
-  bin: { roughness: 0.6 },
-  cube: { roughness: 0.55 },                             // 3D-printed PLA
+  red: { roughness: 0.55 }, green: { roughness: 0.55 }, blue: { roughness: 0.55 },        // printed PLA
+  red_bin: { roughness: 0.7 }, green_bin: { roughness: 0.7 }, blue_bin: { roughness: 0.7 },
 }
+// Visible room around the robot (robot frame: x forward, z up); visual only, nothing collides with it.
+// The box bottom sits 2 cm under the MuJoCo floor plane so the two don't z-fight.
+const ROOM = { size: [7, 7, 2.9], center: [0.8, 0, 1.43], wall: 0xcfd3d6, lightPanel: [0.45, 0, 2.87] }
 const GHOST_SHOW_AT = 0.02   // m between the operator's wrist and the robot palm before the ghost appears
 const GHOST_FULL_AT = 0.06
 const GHOST_CHAINS = [
@@ -51,6 +54,8 @@ const TOUCH_EMISSIVE = new THREE.Color(0x0e4a26)
 const NO_EMISSIVE = new THREE.Color(0x000000)
 const CORRECTION = [XR_TO_URDF_L, XR_TO_URDF_R]
 const RAW_HAND = 25 * 7
+const HAND_DROPOUT_S = 0.2   // tracking gap after which the filters restart from the new pose
+const HUD_HZ = 4
 
 // three.js plane facing the robot (normal -x in the MuJoCo frame), text running toward the robot's right
 const FACING_ROBOT = new THREE.Quaternion().setFromRotationMatrix(new THREE.Matrix4().makeBasis(
@@ -63,6 +68,8 @@ const _inv = new THREE.Matrix4()
 const _rootQinv = new THREE.Quaternion()
 const _eye = new THREE.Vector3()
 const _palm = new THREE.Vector3()
+const _headPos = new THREE.Vector3()
+const _headQuat = new THREE.Quaternion()
 const _dummy = new THREE.Object3D()
 
 export function MujocoScene() {
@@ -72,25 +79,36 @@ export function MujocoScene() {
   const [world, setWorld] = useState(null)
   const latest = useRef(null)
   const applied = useRef(null)
-  const saved = useRef({ total: 0, success: 0 })
-  const xr = useRef({ session: null, calibrated: false, hands: [newHandState(), newHandState()] })
+  // What the HUD knows about storage: committed counts plus in-flight / failed saves
+  const saves = useRef({ total: 0, success: 0, pending: 0, failed: 0, persistent: null, error: null })
+  const xr = useRef({ session: null, refSpace: null, calibrated: false, hands: [newHandState(), newHandState()] })
   const input = useRef({ input: new Float32Array(INPUT_SIZE), raw: new Float32Array(RAW_SIZE) })
 
   useEffect(() => {
     const worker = new Worker(new URL('../sim/sim.worker.js', import.meta.url), { type: 'module' })
     workerRef.current = worker
     setStatusText('Loading physics…')
+    const fail = message => {
+      console.error('[sim]', message)
+      saves.current.error = 'PHYSICS ERROR — reload the page'
+      setStatusText('Physics failed: ' + message.split('\n')[0])
+    }
     worker.onmessage = ({ data }) => {
-      if (data.type === 'state') latest.current = data
-      else if (data.type === 'ready') {
+      if (data.type === 'state') {
+        latest.current = data
+      } else if (data.type === 'ready') {
         setWorld(buildWorld(data))
         setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`)
-      } else if (data.type === 'episode') saveEpisode(data.header, data.buffer)
-      else if (data.type === 'error') {
-        console.error('[sim]', data.message)
-        setStatusText('Physics failed to load — see console')
+      } else if (data.type === 'episode') {
+        saves.current.pending++
+        saveEpisode(data.header, data.buffer)
+          .catch(err => { saves.current.failed++; console.error('[episodes] save failed', err) })
+          .finally(() => { saves.current.pending-- })
+      } else if (data.type === 'error') {
+        fail(data.message)
       }
     }
+    worker.onerror = e => fail(e.message ?? String(e))
     worker.postMessage({
       type: 'init',
       baseUrl: new URL(import.meta.env.BASE_URL, location.href).href,
@@ -98,8 +116,10 @@ export function MujocoScene() {
       autopilot: params.has('autopilot'),
       session: SESSION_ID,
       task: params.get('task') || undefined,
+      appVersion: __GIT_SHA__,
     })
-    const unsubscribe = onEpisodesChanged(s => { saved.current = s })
+    const unsubscribe = onEpisodesChanged(s => Object.assign(saves.current, s))
+    requestPersistence().then(ok => { saves.current.persistent = ok }).catch(() => { saves.current.persistent = false })
     return () => { worker.terminate(); unsubscribe() }
   }, [])
 
@@ -107,10 +127,13 @@ export function MujocoScene() {
   useEffect(() => {
     const pmrem = new THREE.PMREMGenerator(gl)
     const env = pmrem.fromScene(new RoomEnvironment(), 0.04).texture
+    pmrem.dispose()
+    // The scene object is three.js state, not React state; assigning its environment is the supported way
+    /* eslint-disable react-hooks/immutability */
     scene.environment = env
     scene.environmentIntensity = 0.55
-    pmrem.dispose()
     return () => { scene.environment = null; env.dispose() }
+    /* eslint-enable react-hooks/immutability */
   }, [gl, scene])
 
   // Desktop preview camera: front-left of the robot, or the operator's view with ?view=eye.
@@ -138,7 +161,8 @@ export function MujocoScene() {
     if (s && s !== applied.current) {
       applied.current = s
       applyBodies(world, s.bodies)
-      applyInfo(world, s.info, saved.current)
+      workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies }, [s.bodies.buffer])
+      applyInfo(world, s.info, saves.current)
     }
     if (!xrFrame) return
 
@@ -149,23 +173,36 @@ export function MujocoScene() {
     if (st.session !== session) {
       st.session = session
       st.calibrated = false
-      st.hands.forEach(h => h.lastSeen = -Infinity)
+      st.hands.forEach(h => { h.lastSeen = -Infinity })
+      // Leaving VR ends the running episode; the worker's input watchdog also stops the hands
+      session.addEventListener('end', () => { workerRef.current?.postMessage({ type: 'abort' }) }, { once: true })
+    }
+    if (st.refSpace !== refSpace) {
+      st.refSpace = refSpace
+      st.calibrated = false
+      // Quest "recenter": the reference space moves, so the world must be placed again
+      refSpace.addEventListener('reset', () => { st.calibrated = false })
     }
 
-    _eye.fromArray(world.eye)
+    const viewer = xrFrame.getViewerPose(refSpace)
+    if (!viewer) return // no tracking this frame; keep the last input until the worker's watchdog clears it
+    const { position: hp, orientation: hq } = viewer.transform
+    _headPos.set(hp.x, hp.y, hp.z)
+    _headQuat.set(hq.x, hq.y, hq.z, hq.w)
     if (!st.calibrated) {
-      calibrate(camera, worldRef.current, world.root, _eye)
+      _eye.fromArray(world.eye)
+      calibrate(_headPos, _headQuat, worldRef.current, world.root, _eye)
       st.calibrated = true
     }
 
     const { input: inp, raw } = input.current
-    readOperator(xrFrame, session, refSpace, camera, world, st.hands, delta, inp, raw)
+    readOperator(xrFrame, session, refSpace, world, st.hands, delta, inp, raw)
     workerRef.current?.postMessage({ type: 'input', input: inp, raw })
   })
 
   return (
     <>
-      <hemisphereLight skyColor="#c8d8e8" groundColor="#4a4540" intensity={0.9} />
+      <hemisphereLight args={['#c8d8e8', '#4a4540', 0.9]} />
       <group ref={worldRef}>
         {world && <primitive object={world.root} />}
       </group>
@@ -190,6 +227,7 @@ function buildWorld({ scene, eye, task }) {
   const handMaterials = [0, 1].map(() => [MAT_BODY.clone(), MAT_ACCENT.clone(), MAT_PAD.clone()])
   const headMeshes = []
   const meshCache = new Map()
+  const materialCache = new Map()
 
   const objects = new Set(task.objects)
   for (const geom of scene.geoms) {
@@ -198,13 +236,16 @@ function buildWorld({ scene, eye, task }) {
     const isRobot = ROBOT_BODY.test(bodyName)
     let material
     if (!isRobot) {
-      const [r, g, b, a] = geom.rgba
-      const key = Object.keys(SCENE_MATERIALS).find(k => geom.name.startsWith(k))
-      material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace),
-        roughness: 0.6, transparent: a < 1, opacity: a,
-        ...(key ? SCENE_MATERIALS[key] : {}),
-      })
+      const key = geom.material + '|' + geom.rgba.join(',') + (geom.mesh >= 0 ? '|flat' : '')
+      if (!materialCache.has(key)) {
+        const [r, g, b, a] = geom.rgba
+        materialCache.set(key, new THREE.MeshStandardMaterial({
+          color: new THREE.Color().setRGB(r, g, b, THREE.SRGBColorSpace),
+          roughness: 0.6, transparent: a < 1, opacity: a, flatShading: geom.mesh >= 0,
+          ...(MATERIAL_LOOK[geom.material] ?? {}),
+        }))
+      }
+      material = materialCache.get(key)
     } else {
       const hand = bodyName.startsWith('left_hand_') || bodyName === 'left_wrist_yaw_link' ? 0
         : bodyName.startsWith('right_hand_') || bodyName === 'right_wrist_yaw_link' ? 1 : -1
@@ -271,33 +312,32 @@ function buildWorld({ scene, eye, task }) {
   return { root, bodies, eye, handMaterials, headMeshes, hud, reset, ghostGroup, ghosts, wristBodies }
 }
 
+const MJ_GEOM = { PLANE: 0, SPHERE: 2, CAPSULE: 3, ELLIPSOID: 4, CYLINDER: 5, BOX: 6, MESH: 7 }
+
 function geomGeometry(g, meshes, cache) {
   const [s0, s1, s2] = g.size
   switch (g.type) {
-    case 0: return new THREE.PlaneGeometry(s0 > 0 ? 2 * s0 : 30, s1 > 0 ? 2 * s1 : 30)
-    case 2: return new THREE.SphereGeometry(s0, 24, 16)
-    case 3: return new THREE.CapsuleGeometry(s0, 2 * s1, 8, 16).rotateX(Math.PI / 2)
-    case 4: return new THREE.SphereGeometry(1, 24, 16).scale(s0, s1, s2)
-    case 5: {
-      if (g.name !== 'tube') return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
-      // hollow tube with a 2 mm wall; the physics collides with the solid cylinder
+    case MJ_GEOM.PLANE: return new THREE.PlaneGeometry(s0 > 0 ? 2 * s0 : 30, s1 > 0 ? 2 * s1 : 30)
+    case MJ_GEOM.SPHERE: return new THREE.SphereGeometry(s0, 24, 16)
+    case MJ_GEOM.CAPSULE: return new THREE.CapsuleGeometry(s0, 2 * s1, 8, 16).rotateX(Math.PI / 2)
+    case MJ_GEOM.ELLIPSOID: return new THREE.SphereGeometry(1, 24, 16).scale(s0, s1, s2)
+    case MJ_GEOM.CYLINDER: {
+      if (g.material !== 'tube') return new THREE.CylinderGeometry(s0, s0, 2 * s1, 32).rotateX(Math.PI / 2)
+      // Hollow tube with a 2 mm wall; the physics has a matching ring of thin boxes (see tube_box.xml)
       const ri = s0 - 0.002
       const profile = [[ri, -s1], [s0, -s1], [s0, s1], [ri, s1], [ri, -s1]].map(([x, y]) => new THREE.Vector2(x, y))
-      const lathe = new THREE.LatheGeometry(profile, 48).toNonIndexed()
-      lathe.computeVertexNormals()
-      return lathe.rotateX(Math.PI / 2)
+      return new THREE.LatheGeometry(profile, 48).rotateX(Math.PI / 2)
     }
-    case 6: return new THREE.BoxGeometry(2 * s0, 2 * s1, 2 * s2)
-    case 7: {
+    case MJ_GEOM.BOX: return new THREE.BoxGeometry(2 * s0, 2 * s1, 2 * s2)
+    case MJ_GEOM.MESH: {
       if (!cache.has(g.mesh)) {
         const { vert, face } = meshes[g.mesh]
         const geo = new THREE.BufferGeometry()
         geo.setAttribute('position', new THREE.BufferAttribute(vert, 3))
-        geo.setIndex(new THREE.BufferAttribute(face, 1))
-        // flat shading like the STL renderer
-        const flat = geo.toNonIndexed()
-        flat.computeVertexNormals()
-        cache.set(g.mesh, flat)
+        // MuJoCo faces are Int32; WebGL index buffers must be unsigned
+        geo.setIndex(new THREE.BufferAttribute(new Uint32Array(face.buffer, face.byteOffset, face.length), 1))
+        geo.computeVertexNormals() // smooth normals suit the decimated robot; scene meshes (bins) use flatShading
+        cache.set(g.mesh, geo)
       }
       return cache.get(g.mesh)
     }
@@ -314,12 +354,12 @@ function applyBodies(world, b) {
   }
 }
 
-function applyInfo(world, info, saved) {
+function applyInfo(world, info, saves) {
   for (let s = 0; s < 2; s++) {
     for (const mat of world.handMaterials[s]) mat.emissive.copy(info.touching[s] ? TOUCH_EMISSIVE : NO_EMISSIVE)
   }
   world.reset.setProgress(info.resetProgress)
-  world.hud.draw(info, saved)
+  world.hud.draw(info, saves)
 }
 
 // ── Ghost hand: the operator's real hand, shown only when the robot hand can't follow it ────────────
@@ -374,7 +414,8 @@ function makeGhostHand() {
 const STATUS_TEXT = {
   waiting: ['RAISE YOUR HANDS TO START', '#9fb4c8'],
   running: ['RECORDING', '#ff5d5d'],
-  success: ['SUCCESS — SAVED', '#5dff8f'],
+  success: ['SUCCESS', '#5dff8f'],
+  partial: ['DONE — NOT ALL CORRECT', '#ffb35d'],
   dropped: ['DROPPED — RESETTING', '#ffb35d'],
   timeout: ['TIMEOUT — RESETTING', '#ffb35d'],
   aborted: ['RESET', '#9fb4c8'],
@@ -392,16 +433,21 @@ function makeHud(instruction) {
     new THREE.MeshBasicMaterial({ map: texture, transparent: true, toneMapped: false }),
   )
   let last = ''
-  const draw = (info, saved) => {
-    const [label, color] = STATUS_TEXT[info.status] ?? [info.status.toUpperCase(), '#ffffff']
+  let lastDraw = 0
+  const draw = (info, saves) => {
+    const now = performance.now()
+    if (now - lastDraw < 1000 / HUD_HZ) return
+    const [label, color] = saves.error ? [saves.error, '#ff5d5d'] : STATUS_TEXT[info.status] ?? [info.status.toUpperCase(), '#ffffff']
+    const storage = saves.failed ? `SAVE FAILED ×${saves.failed}` : saves.pending ? 'saving…' : `saved ${saves.total} (${saves.success} ok)`
     const lines = [
-      label + (info.status === 'running' ? `  ${info.elapsed.toFixed(1)} s` : ''),
-      (info.taskLine ? `${info.taskLine}   ·   ` : '') + `episode ${info.episode}   saved ${saved.total} (${saved.success} ok)`,
-      `physics ${info.rtf.toFixed(2)}× real time · ${info.msPerStep.toFixed(2)} ms/step`,
+      label + (info.status === 'running' ? `  ${Math.floor(info.elapsed)} s` : ''),
+      (info.taskLine ? `${info.taskLine}   ·   ` : '') + `episode ${info.episode}   ${storage}`,
+      `physics ${info.rtf.toFixed(2)}× real time · ${info.msPerStep.toFixed(2)} ms/step` + (saves.persistent === false ? ' · storage not persistent' : ''),
     ]
     const key = lines.join('|') + color
     if (key === last) return
     last = key
+    lastDraw = now
     ctx.clearRect(0, 0, 1024, 512)
     ctx.fillStyle = 'rgba(10, 16, 24, 0.78)'
     ctx.beginPath()
@@ -413,10 +459,10 @@ function makeHud(instruction) {
     ctx.fillStyle = color
     ctx.font = '700 64px system-ui, sans-serif'
     ctx.fillText(lines[0], 56, 228)
-    ctx.fillStyle = '#c8d4e0'
+    ctx.fillStyle = saves.failed ? '#ff5d5d' : '#c8d4e0'
     ctx.font = '400 40px system-ui, sans-serif'
     ctx.fillText(lines[1], 56, 338)
-    ctx.fillStyle = info.rtf < 0.95 ? '#ffb35d' : '#7f93a6'
+    ctx.fillStyle = info.rtf < 0.95 || saves.persistent === false ? '#ffb35d' : '#7f93a6'
     ctx.font = '400 34px system-ui, sans-serif'
     ctx.fillText(lines[2], 56, 432)
     texture.needsUpdate = true
@@ -459,18 +505,19 @@ function makeResetButton() {
 }
 
 // ── Calibration ──────────────────────────────────────────────────────────────
-// Once per session: turn the world to face the way the headset faces and put the robot's eyes under the
-// headset horizontally. Height stays the room's (the robot's eyes are at 1.24 m; a seated operator is lower)
-// and the world never moves afterwards: a world that follows the head is what made people dizzy.
+// Once per session (and again after a headset recenter): turn the world to face the way the head faces and
+// put the robot's eyes under the head horizontally. Height stays the room's (the robot's eyes are at 1.24 m;
+// a seated operator is lower) and the world never moves afterwards: a world that follows the head is what
+// made people dizzy.
 
-function calibrate(camera, worldGroup, root, eyeLocal) {
-  const euler = new THREE.Euler().setFromQuaternion(camera.quaternion, 'YXZ')
+function calibrate(headPos, headQuat, worldGroup, root, eyeLocal) {
+  const euler = new THREE.Euler().setFromQuaternion(headQuat, 'YXZ')
   worldGroup.position.set(0, 0, 0)
   worldGroup.rotation.set(0, euler.y, 0)
   worldGroup.updateMatrixWorld(true)
   const eye = root.localToWorld(eyeLocal.clone())
-  worldGroup.position.x += camera.position.x - eye.x
-  worldGroup.position.z += camera.position.z - eye.z
+  worldGroup.position.x += headPos.x - eye.x
+  worldGroup.position.z += headPos.z - eye.z
   worldGroup.updateMatrixWorld(true)
 }
 
@@ -481,10 +528,9 @@ function newHandState() {
   for (const n of XR_JOINT_NAMES) joints[n] = { position: new THREE.Vector3(), quaternion: new THREE.Quaternion() }
   return {
     joints,
-    present: {},
     pos: new OneEuroVector3(),
-    quat: new QuaternionSmoother(0.5),
-    fingers: new RetargetingFilter(0.4),
+    quat: new QuaternionSmoother(0.02),
+    fingers: new RetargetingFilter(),
     corrected: new THREE.Quaternion(),
     lastSeen: -Infinity,
   }
@@ -498,14 +544,14 @@ function writePose(p, q, out, o) {
   out[o + 3] = _q.w; out[o + 4] = _q.x; out[o + 5] = _q.y; out[o + 6] = _q.z
 }
 
-function readOperator(xrFrame, session, refSpace, camera, world, hands, dt, input, raw) {
+function readOperator(xrFrame, session, refSpace, world, hands, dt, input, raw) {
   const { root } = world
   root.updateWorldMatrix(true, false)
   _inv.copy(root.matrixWorld).invert()
   root.getWorldQuaternion(_rootQinv).invert()
   input.fill(0)
   raw.fill(0)
-  writePose(camera.position, camera.quaternion, raw, 0)
+  writePose(_headPos, _headQuat, raw, 0)
   const now = performance.now() / 1000
 
   const seen = [false, false]
@@ -531,15 +577,15 @@ function readOperator(xrFrame, session, refSpace, camera, world, hands, dt, inpu
     if (!wrist) continue
 
     // Re-acquired after a dropout: start the filters fresh instead of sweeping from the old pose
-    if (now - h.lastSeen > 0.2) { h.pos.reset(); h.quat.reset(); h.fingers.reset() }
+    if (now - h.lastSeen > HAND_DROPOUT_S) { h.pos.reset(); h.quat.reset(); h.fingers.reset() }
     h.lastSeen = now
 
     const o = s * HAND_INPUT
     input[o] = 1
     const pos = h.pos.update(wrist.position, dt)
     h.corrected.copy(wrist.quaternion).multiply(CORRECTION[s])
-    writePose(pos, h.quat.update(h.corrected), input, o + 1)
-    const f = h.fingers.update(retargetHand(joints))
+    writePose(pos, h.quat.update(h.corrected, dt), input, o + 1)
+    const f = h.fingers.update(retargetHand(joints), dt)
     input.set([f.thumb.abduction, f.thumb.curl[0], f.thumb.curl[1], f.index.curl[0], f.index.curl[1],
       f.middle.curl[0], f.middle.curl[1]], o + 8)
 

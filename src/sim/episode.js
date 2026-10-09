@@ -1,8 +1,9 @@
 // Episode container: a file is any number of concatenated chunks
 //   u32 magic 'IAMR' | u32 header bytes | header JSON (utf-8, zero-padded to 4) | u32 data bytes | float32 frames
-// Reader: scripts/load_episodes.py
+// Readers: decodeEpisodes below (JS) and scripts/load_episodes.py (Python).
 
 export const EPISODE_MAGIC = 0x524d4149 // "IAMR" read as little-endian u32
+export const EPISODE_FORMAT = 'iamr-episode-v1'
 
 export function encodeEpisode(header, frames) {
   const json = new TextEncoder().encode(JSON.stringify(header))
@@ -15,6 +16,28 @@ export function encodeEpisode(header, frames) {
   view.setUint32(8 + headerBytes, frames.byteLength, true)
   new Uint8Array(buf, 12 + headerBytes).set(new Uint8Array(frames.buffer, frames.byteOffset, frames.byteLength))
   return buf
+}
+
+/** Parses a .iamr file (one or more chunks) into [{ header, frames: Float32Array }]. */
+export function decodeEpisodes(buffer) {
+  const view = new DataView(buffer)
+  const episodes = []
+  let o = 0
+  while (o < buffer.byteLength) {
+    if (view.getUint32(o, true) !== EPISODE_MAGIC) throw new Error(`bad magic at byte ${o}`)
+    const headerBytes = view.getUint32(o + 4, true)
+    const json = new TextDecoder().decode(new Uint8Array(buffer, o + 8, headerBytes)).replace(/\0+$/, '')
+    const header = JSON.parse(json)
+    if (header.format !== EPISODE_FORMAT) throw new Error(`unsupported episode format ${header.format}`)
+    o += 8 + headerBytes
+    const dataBytes = view.getUint32(o, true)
+    o += 4
+    // copy so the frames are 4-byte aligned regardless of the chunk offset
+    const frames = new Float32Array(buffer.slice(o, o + dataBytes))
+    o += dataBytes
+    episodes.push({ header, frames })
+  }
+  return episodes
 }
 
 /** Fixed-layout frame log, grown on demand. `fields` is [{ name, size }] in frame order. */

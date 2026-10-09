@@ -5,32 +5,36 @@
 // A task module (src/sim/tasks/*.js) provides:
 //   name, instruction (language instruction logged with each episode), title (short HUD text), scene (xml under
 //   public/), objects (free bodies, joint named `${body}_free`), timeout, reset(sim, rng) -> layout,
-//   randomize?(rng) -> physics params, sceneActuators (count of non-robot actuators, e.g. belt motors), and either
+//   randomize?(rng) -> physics params, and either
 //     goal(sim) -> boolean with dropZ   (static tasks: success once the goal holds with objects at rest and hands off)
 //   or
 //     update(sim) -> outcome | null     (dynamic tasks: called every control tick, runs its own spawning/scoring and
 //                                        returns 'success' / 'partial' / ... to end the episode)
 //   plus optional hud(sim) -> string for the panel, result(sim) -> per-episode scoring for the header,
 //   autopilot?(sim, t) -> per-hand grip targets, solved?(sim) for the headless check.
+//   Per-episode task state belongs in `sim.taskState` (set in reset), never on the module object.
 //   Teleports done by a task while running must go through sim.teleportObject so replay can re-apply them.
 //   An event's `tick` is the index of the last frame recorded before the teleport: replay applies it after
-//   comparing that frame and before stepping on to the next.
+//   comparing that frame and before stepping on to the next (see replay.js).
 
 import { ArmIK, ARM_JOINTS } from './ik.js'
-import { EpisodeRecorder } from './episode.js'
+import { EpisodeRecorder, EPISODE_FORMAT } from './episode.js'
 import { writeHandInput } from './autopilot.js'
 
 export const CONTROL_HZ = 50
 export const SIDES = ['left', 'right']
 export const FINGER_JOINTS = ['thumb_0', 'thumb_1', 'thumb_2', 'index_0', 'index_1', 'middle_0', 'middle_1']
+/** Physics timesteps that divide the control period exactly (so control stays at CONTROL_HZ). */
+export const TIMESTEPS = [0.001, 0.002, 0.0025, 0.004, 0.005]
 
 // Per-hand operator input: tracked, palm position (3), palm quaternion w,x,y,z (4), finger commands (7):
 // thumb rotation in [-1, 1], then curls in [0, 1] for thumb_1, thumb_2, index_0, index_1, middle_0, middle_1.
 // Positions/orientations are in the MuJoCo world frame (x forward, y left, z up).
 export const HAND_INPUT = 15
 export const INPUT_SIZE = 2 * HAND_INPUT
-// Raw operator data, recorded for re-retargeting later: head pose (pos 3 + quat wxyz 4), then for each hand
-// the 25 WebXR joints (pos 3 + quat wxyz 4), all in the MuJoCo world frame.
+// Raw operator data, recorded for re-retargeting later: viewer (head) pose (pos 3 + quat wxyz 4), then for
+// each hand the 25 WebXR joints (pos 3 + quat wxyz 4), all in the MuJoCo world frame. An untracked joint is
+// all zeros (its quaternion has zero norm).
 export const RAW_SIZE = 7 + 2 * 25 * 7
 
 // Shared across tasks
@@ -38,6 +42,7 @@ export const COMMON = {
   restSpeed: 0.05,              // m/s: objects must be slower than this for the goal to count
   successHold: 0.5,             // s the goal must hold with both hands off the objects
   endHold: 1.5,                 // s to show the outcome before the next episode
+  minEpisode: 1,                // s: shorter episodes are discarded, not saved
   resetButton: [0.18, 0.36, 1.06],
   resetRadius: 0.06,
   resetHold: 0.6,
@@ -62,6 +67,7 @@ const ARM_SPEED = [3, 3, 3, 3, 5, 5, 5]
 // is blocked by contact the target stops running ahead, so the motor pushes with a bounded force and the
 // arm doesn't whip when it comes free. With kp=80 this caps the extra torque at ~10 Nm (wrist kp=40: ~5 Nm).
 const ARM_LEAD = 0.12
+const ROBOT_BODY = /_link$|^pelvis$/
 
 function mulberry32(seed) {
   let a = seed >>> 0
@@ -81,6 +87,7 @@ export class TaskSim {
    * @param task    task module
    * @param opts.onEpisode  called with { header, frames: Float32Array } whenever an episode ends
    * @param opts.autopilot  drive the hands with the task's scripted demonstration (testing / desktop demo)
+   * @param opts.meta       extra header fields (session id, asset hashes, app version)
    */
   constructor(mj, m, task, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {}, armLead = ARM_LEAD } = {}) {
     this.mj = mj
@@ -95,7 +102,10 @@ export class TaskSim {
     this.armLead = armLead
 
     this.dt = m.opt.timestep
-    this.stepsPerControl = Math.max(1, Math.round(1 / (CONTROL_HZ * this.dt)))
+    if (!TIMESTEPS.some(t => Math.abs(t - this.dt) < 1e-9)) {
+      throw new Error(`timestep ${this.dt} must be one of ${TIMESTEPS.join(', ')} so control stays at ${CONTROL_HZ} Hz`)
+    }
+    this.stepsPerControl = Math.round(1 / (CONTROL_HZ * this.dt))
     this.controlDt = this.stepsPerControl * this.dt
     this.steps = 0
 
@@ -126,6 +136,17 @@ export class TaskSim {
       }
     })
     this.armDof = this.arms.flatMap(a => Array.from(a.ik.jnt, j => m.jnt_dofadr[j]))
+
+    // Robot actuators come first in the model (the robot file is included before the scene); scene actuators
+    // such as belt motors follow and are recorded in `action` too, after the robot's.
+    const actuatorBody = a => this.name('mjOBJ_BODY', m.jnt_bodyid[m.actuator_trnid[2 * a]])
+    this.robotNu = 0
+    for (let a = 0; a < m.nu; a++) {
+      if (ROBOT_BODY.test(actuatorBody(a))) {
+        if (a !== this.robotNu) throw new Error('robot actuators must precede scene actuators')
+        this.robotNu++
+      }
+    }
 
     // Which hand (0 left, 1 right, -1 none) each body belongs to. The palm geom lives on the wrist_yaw body.
     this.handOfBody = new Int8Array(m.nbody).fill(-1)
@@ -181,6 +202,7 @@ export class TaskSim {
       { name: 'raw', size: RAW_SIZE },
       { name: 'touching', size: 2 },
     ])
+    this.rtf = { min: Infinity, sum: 0, n: 0 } // real-time factor samples supplied by the host while running
 
     this.episode = 0
     this.reset()
@@ -191,7 +213,27 @@ export class TaskSim {
     if (raw) this.raw.set(raw)
   }
 
+  /** Marks both hands untracked (operator left, tracking lost): a running episode keeps going on held targets. */
+  clearInput() {
+    this.input.fill(0)
+    this.raw.fill(0)
+  }
+
   requestReset() { this.pendingReset = true }
+
+  /** Ends a running episode as 'aborted' and resets; used when the XR session ends. */
+  abort() {
+    if (this.status === 'running') this.endEpisode('aborted')
+    this.pendingReset = true
+  }
+
+  /** Host-side real-time factor sample (1 = keeping up), folded into the episode header. */
+  reportRealtime(rtf) {
+    if (this.status !== 'running') return
+    this.rtf.min = Math.min(this.rtf.min, rtf)
+    this.rtf.sum += rtf
+    this.rtf.n++
+  }
 
   reset() {
     const { mj, m, d, task } = this
@@ -210,6 +252,7 @@ export class TaskSim {
       }
       arm.fingerCmd.fill(0)
     }
+    this.taskState = null
     this.layout = task.reset(this, rng)
     mj.mj_forward(m, d)
     this.readyGrip = this.arms.map(arm => Array.from(d.site_xpos.slice(3 * arm.gripSite, 3 * arm.gripSite + 3)))
@@ -220,10 +263,11 @@ export class TaskSim {
     this.scheduled = []
     this.frameIndex = 0
     this.peakArmVel = 0
+    this.rtf = { min: Infinity, sum: 0, n: 0 }
     this.status = 'waiting' // until the operator's hands show up
-    this.goalMet = false
     this.steps = 0
     this.startTime = 0
+    this.startedAt = null
     this.endTime = 0
     this.successTimer = 0
     this.resetTimer = 0
@@ -247,17 +291,15 @@ export class TaskSim {
     return Math.hypot(this.d.qvel[v], this.d.qvel[v + 1], this.d.qvel[v + 2])
   }
 
-  objectTouched(i) { return this.touch[2 * i] || this.touch[2 * i + 1] }
-
-  /** Runs fn right after frame `tick` is recorded, so any teleport it does lands on a frame boundary. */
-  scheduleAtFrame(tick, fn) { this.scheduled.push({ tick, fn }) }
-
   /** z component of the object's own +z axis in the world: 1 upright, 0 on its side, -1 upside down. */
   objectUp(i) {
     const q = this.objects[i].q
     const x = this.d.qpos[q + 4], y = this.d.qpos[q + 5]
     return 1 - 2 * (x * x + y * y)
   }
+
+  /** Runs fn right after frame `tick` is recorded, so any teleport it does lands on a frame boundary. */
+  scheduleAtFrame(tick, fn) { this.scheduled.push({ tick, fn }) }
 
   /** Teleports an object mid-episode (spawning / despawning) and logs it so replay can re-apply it. */
   teleportObject(i, pos, quat = [1, 0, 0, 0]) {
@@ -267,7 +309,23 @@ export class TaskSim {
     if (this.status === 'running') this.events.push({ tick: this.frameIndex - 1, qpos_adr: obj.q, qpos: [...pos, ...quat], qvel_adr: obj.v })
   }
 
-  /** Applies randomized object properties { [objectName]: { mass?, friction? } }; also restores them for replay. */
+  /**
+   * Deepest penetration (m, positive) among contacts involving a task object. Used by the headless check to
+   * assert that resets start from a physically valid state.
+   */
+  maxObjectPenetration() {
+    const contacts = this.d.contact
+    let worst = 0
+    for (let i = 0, n = contacts.size(); i < n; i++) {
+      const c = contacts.get(i)
+      if ((this.objectOfGeom[c.geom1] >= 0 || this.objectOfGeom[c.geom2] >= 0) && c.dist < 0) worst = Math.max(worst, -c.dist)
+      c.delete()
+    }
+    contacts.delete()
+    return worst
+  }
+
+  /** Applies randomized object properties { [objectName]: { mass?, friction? } } (replay.js mirrors this). */
   setPhysics(params) {
     const { mj, m, d } = this
     for (const obj of this.objects) {
@@ -307,6 +365,7 @@ export class TaskSim {
     if (this.status === 'waiting' && anyTracked) {
       this.status = 'running'
       this.startTime = d.time
+      this.startedAt = new Date().toISOString()
     }
 
     for (let s = 0; s < 2; s++) {
@@ -330,6 +389,7 @@ export class TaskSim {
       for (let k = 0; k < arm.fingerAct.length; k++) d.ctrl[arm.fingerAct[k]] = Math.fround(arm.fingerCmd[k])
     }
 
+    this.scanContacts()
     if (this.status === 'running') {
       for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
       this.recorder.push([d.time - this.startTime, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching])
@@ -352,10 +412,9 @@ export class TaskSim {
     return Math.max(lo, Math.min(hi, target))
   }
 
-  updateTask() {
-    const { m, d, task } = this
-    const cdt = this.controlDt
-
+  /** Which hand touches which task object, from the current contact list. */
+  scanContacts() {
+    const { m, d } = this
     this.touch.fill(0)
     this.touching.fill(0)
     const contacts = d.contact
@@ -372,17 +431,20 @@ export class TaskSim {
       this.touching[hand] = 1
     }
     contacts.delete()
+  }
+
+  updateTask() {
+    const { d, task } = this
+    const cdt = this.controlDt
 
     if (task.update) {
-      this.goalMet = false
       if (this.status === 'running') {
         const outcome = task.update(this)
         if (outcome) this.endEpisode(outcome)
         else if (d.time - this.startTime > task.timeout) this.endEpisode('timeout')
       }
     } else {
-      this.goalMet = task.goal(this)
-      let settled = this.goalMet && !this.touching[0] && !this.touching[1]
+      let settled = task.goal(this) && !this.touching[0] && !this.touching[1]
       let dropped = false
       for (let i = 0; i < this.objects.length; i++) {
         if (this.objectSpeed(i) > COMMON.restSpeed) settled = false
@@ -410,16 +472,18 @@ export class TaskSim {
     if (this.resetTimer >= COMMON.resetHold) this.pendingReset = true
   }
 
+  /** Ends the running episode. Returns true if it was handed to onEpisode (long enough to keep). */
   endEpisode(outcome) {
     const { m, d, task } = this
     this.status = outcome
     this.endTime = d.time
-    const frames = this.recorder.snapshot()
     const duration = d.time - this.startTime
-    if (!this.onEpisode || duration < 1) return
+    this.lastSaved = this.onEpisode && duration >= COMMON.minEpisode
+    if (!this.lastSaved) return false
+    const frames = this.recorder.snapshot()
     this.onEpisode({
       header: {
-        format: 'iamr-episode-v1',
+        format: EPISODE_FORMAT,
         task: task.name,
         instruction: task.instruction,
         scene: task.scene,
@@ -428,21 +492,26 @@ export class TaskSim {
         episode: this.episode,
         seed: this.seed,
         duration,
-        recorded_at: new Date().toISOString(),
+        started_at: this.startedAt,
+        ended_at: new Date().toISOString(),
         timestep: this.dt,
         control_hz: 1 / this.controlDt,
         steps_per_control: this.stepsPerControl,
+        autopilot: this.autopilot,
         layout: this.layout,
         physics: this.physics,
         objects: task.objects,
         peak_arm_velocity: this.peakArmVel,
+        realtime_factor: this.rtf.n ? { min: this.rtf.min, mean: this.rtf.sum / this.rtf.n } : null,
         flags: this.peakArmVel > COMMON.fastMotion ? ['fast_motion'] : [],
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
+        final_qpos: Array.from(d.qpos),
+        final_qvel: Array.from(d.qvel),
         events: this.events,
         result: task.result ? task.result(this) : undefined,
         nq: m.nq, nv: m.nv, nu: m.nu,
-        robot_nu: m.nu - (task.sceneActuators ?? 0),
+        robot_nu: this.robotNu,
         qpos_names: this.qposNames,
         qvel_names: this.qvelNames,
         actuator_names: this.actuatorNames,
@@ -453,6 +522,7 @@ export class TaskSim {
       },
       frames,
     })
+    return true
   }
 
   /** Body poses for rendering: [x, y, z, qw, qx, qy, qz] per body. */
