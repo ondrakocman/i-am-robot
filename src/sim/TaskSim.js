@@ -97,8 +97,10 @@ export class TaskSim {
    * @param opts.onEpisode  called with { header, frames: Float32Array } whenever an episode ends
    * @param opts.autopilot  drive the hands with the task's scripted demonstration (testing / desktop demo)
    * @param opts.meta       extra header fields (session id, asset hashes, app version)
+   * @param opts.compiled   compiledPhysics() of the freshly loaded model, when this sim is built on a model an
+   *                        earlier sim already randomized (replay scales inertia from the fresh values)
    */
-  constructor(mj, m, task, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {} } = {}) {
+  constructor(mj, m, task, { seed = (Math.random() * 2 ** 31) >>> 0, autopilot = false, onEpisode = null, meta = {}, compiled = null } = {}) {
     this.mj = mj
     this.m = m
     this.task = task
@@ -110,7 +112,7 @@ export class TaskSim {
     this.meta = meta
 
     this.dt = m.opt.timestep // m.opt is a reference view into the model: read it, never delete it
-    this.compiled = compiledPhysics(m) // must be the fresh model: see replay.js
+    this.compiled = compiled ?? compiledPhysics(m) // must be the fresh model's values: see replay.js
     this.warningNames = warningNames(mj)
     if (!TIMESTEPS.some(t => Math.abs(t - this.dt) < 1e-9)) {
       throw new Error(`timestep ${this.dt} must be one of ${TIMESTEPS.join(', ')} so control stays at ${CONTROL_HZ} Hz`)
@@ -264,7 +266,7 @@ export class TaskSim {
     // mj_setConst (inside setPhysics) rewrites qpos to the model default, so it must run before posing anything
     this.setPhysics(task.randomize ? task.randomize(rng) : {})
     this.softPhysics = this.soft && task.randomizeSoft ? task.randomizeSoft(rng) : {}
-    if (this.soft) this.soft.setPhysics(this.softPhysics)
+    if (this.soft) { this.soft.setPhysics(this.softPhysics); this.soft.touching.fill(0) }
     for (const arm of this.arms) {
       for (let k = 0; k < arm.qCmd.length; k++) {
         arm.qCmd[k] = arm.ready[k]
@@ -375,9 +377,9 @@ export class TaskSim {
    * Deepest penetration (m, positive) among contacts involving a task object. Used by the headless check to
    * assert that resets start from a physically valid state.
    */
-  maxObjectPenetration() {
-    const contacts = this.d.contact
-    let worst = this.soft ? this.soft.measurePenetration(this.d) : 0
+  maxObjectPenetration(d = this.d) {
+    const contacts = d.contact
+    let worst = this.soft ? this.soft.measurePenetration(d) : 0
     for (let i = 0, n = contacts.size(); i < n; i++) {
       const c = contacts.get(i)
       if ((this.objectOfGeom[c.geom1] >= 0 || this.objectOfGeom[c.geom2] >= 0) && c.dist < 0) worst = Math.max(worst, -c.dist)
@@ -403,7 +405,12 @@ export class TaskSim {
   step() {
     if (this.steps % this.stepsPerControl === 0) this.control()
     if (this.status === 'waiting') return false
-    if (this.soft) this.soft.step(this.d) // leaves the parcels' reaction forces in xfrc_applied for this step
+    if (this.soft) {
+      // the parcels collide against the current configuration (mj_step leaves the previous one's poses) and
+      // leave their reaction forces in xfrc_applied for this step; replay.js does exactly the same
+      this.mj.mj_kinematics(this.m, this.d)
+      this.soft.step(this.d)
+    }
     this.mj.mj_step(this.m, this.d)
     this.steps++
     return true

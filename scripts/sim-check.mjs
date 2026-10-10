@@ -61,12 +61,15 @@ for (const task of tasks) {
     meta: { session: 'sim-check', app_version: 'sim-check', mujoco: MUJOCO_VERSION, assets }, // same header fields as the headset
   })
   if (!task.autopilot) console.log('no scripted demonstration for this task: checking goal detection from the solved configuration')
-  // every teleport a task performs mid-episode (spawns, solved placement) must land in a valid state
+  // every teleport a task performs mid-episode (spawns, solved placement) must land in a valid state; measured
+  // on a scratch MjData so the recording's own data is stepped exactly as on the headset
   let worstTeleport = 0
+  const scratch = new mj.MjData(m)
+  const measure = () => { scratch.qpos.set(sim.d.qpos); mj.mj_forward(m, scratch); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration(scratch)) }
   const teleport = sim.teleportObject.bind(sim)
-  sim.teleportObject = (...a) => { teleport(...a); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
+  sim.teleportObject = (...a) => { teleport(...a); measure() }
   const teleportSoft = sim.teleportSoft.bind(sim)
-  sim.teleportSoft = (...a) => { teleportSoft(...a); mj.mj_forward(m, sim.d); worstTeleport = Math.max(worstTeleport, sim.maxObjectPenetration()) }
+  sim.teleportSoft = (...a) => { teleportSoft(...a); measure() }
   const t0 = performance.now()
   let steps = 0
   let solvedFor = 0
@@ -82,6 +85,27 @@ for (const task of tasks) {
   }
   const ms = (performance.now() - t0) / steps
   console.log(`${steps} steps, ${ms.toFixed(3)} ms/step (${(ms / (sim.dt * 1000) * 100).toFixed(0)}% of real time on one core)`)
+  scratch.delete()
+  // 1b. contact cases: scripted hands and objects meeting the task's soft parcels (replayed like the rest)
+  const contactEpisodes = []
+  for (const c of task.contactCases ?? []) {
+    const got = []
+    const scripted = { ...task, autopilot: c.hands }
+    // built on the model the main sim already randomized: scale from the fresh values, as replay will
+    const probe = new TaskSim(mj, m, scripted, { seed: 21, autopilot: true, compiled: base, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
+    probe.scheduleAtFrame(Math.round(SOLVE_AT_S / probe.controlDt), () => c.setup(probe))
+    while (!got.length && probe.steps < (SOLVE_AT_S + c.duration) / probe.dt) probe.step()
+    if (!got.length) probe.abort('aborted')
+    const h = got[0]?.header
+    if (!h) fail(`contact case '${c.name}' produced no episode`)
+    else {
+      const verdict = c.check ? c.check(probe, h) : null
+      if (verdict) fail(`contact case '${c.name}': ${verdict}`)
+      else console.log(`contact case '${c.name}': ${h.frames} frames recorded (${h.outcome})${c.describe ? ', ' + c.describe(probe) : ''}`)
+      contactEpisodes.push(got[0])
+    }
+    probe.dispose()
+  }
   if (warningCount(sim.d)) fail('MuJoCo raised warnings after the last episode')
   if (episodes.length < runs) fail(`only ${episodes.length}/${runs} episodes finished`)
   if (worstTeleport > MAX_PENETRATION) fail(`a teleport during the episodes landed ${(worstTeleport * 1000).toFixed(1)} mm inside something`)
@@ -97,6 +121,7 @@ for (const task of tasks) {
   sim.dispose()
 
   // 2. replay (fresh data, physics restored from the header, like a downstream consumer would)
+  episodes.push(...contactEpisodes)
   for (const { header, frames } of episodes) {
     applyPhysics(mj, m, header.physics, base)
     const r = replayEpisode(mj, m, header, frames)
@@ -199,7 +224,9 @@ for (const task of tasks) {
   // 6. rendered geoms (group <= 2, as sim.worker.js describes the scene) must carry a material
   const bare = []
   for (let g = 0; g < m.ngeom; g++) {
-    if (m.geom_group[g] <= 2 && m.geom_matid[g] < 0) bare.push(mj.mj_id2name(m, mj.mjtObj.mjOBJ_GEOM.value, g) || `geom ${g} of ${mj.mj_id2name(m, mj.mjtObj.mjOBJ_BODY.value, m.geom_bodyid[g])}`)
+    // this MuJoCo build returns "emsc" rather than null for an unnamed geom
+    const named = mj.mj_id2name(m, mj.mjtObj.mjOBJ_GEOM.value, g)
+    if (m.geom_group[g] <= 2 && m.geom_matid[g] < 0) bare.push(named && named !== 'emsc' ? named : `geom ${g} of ${mj.mj_id2name(m, mj.mjtObj.mjOBJ_BODY.value, m.geom_bodyid[g])}`)
   }
   if (bare.length) fail(`rendered geoms without a material (collision-only geoms need group="3"): ${bare.join(', ')}`)
   else console.log('material check: every rendered geom has a material')

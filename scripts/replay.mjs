@@ -4,8 +4,10 @@
 // The dump is newline-delimited JSON: one {"episode": header} line (header.body_names gives the body order),
 // then one {"t", "xpos", "xquat"} line per frame (world frame, quaternions w,x,y,z), written with back-pressure
 // so memory stays flat.
-// A renderer needs only the logged qpos; this script is the reference for how the actions + events reproduce
-// them, and a check that the headset's build matches this one.
+// Soft parcels add a "soft" array of particle positions to each frame line (header.soft_bodies gives the
+// lattices; softLattice in src/sim/soft.js gives their surface triangles). A renderer needs only the logged
+// qpos (and soft); this script is the reference for how the actions + events reproduce them, and a check that
+// the headset's build matches this one.
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs'
 import { once } from 'node:events'
@@ -45,7 +47,11 @@ for await (const { header, frames } of readEpisodeFile(file)) {
   const gen = replayFrames(mj, m, header, frames)
   let r = gen.next()
   while (!r.done) {
-    if (sink) await write(JSON.stringify({ t: r.value.i / header.control_hz, xpos: Array.from(r.value.d.xpos), xquat: Array.from(r.value.d.xquat) }))
+    if (sink) {
+      const line = { t: r.value.i / header.control_hz, xpos: Array.from(r.value.d.xpos), xquat: Array.from(r.value.d.xquat) }
+      if (r.value.soft) line.soft = Array.from(r.value.soft.gather(new Float64Array(3 * r.value.soft.total)))
+      await write(JSON.stringify(line))
+    }
     r = gen.next()
   }
   if (r.value >= 0) { failures++; console.error(`${tag}: diverged at frame ${r.value}`) }

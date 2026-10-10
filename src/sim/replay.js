@@ -53,7 +53,7 @@ export function* replayFrames(mj, m, header, frames) {
   d.qpos.set(header.initial_qpos)
   d.ctrl.set(header.initial_ctrl ?? [])
   // soft parcels: rebuilt from the header and stepped in lockstep, their logged positions compared too
-  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { half: b.half, cells: b.cells }])), { belts: header.soft_belts ?? [] }) : null
+  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { ...b }])), { belts: header.soft_belts ?? [] }) : null
   if (soft) {
     soft.setPhysics(header.soft_physics ?? {})
     soft.scatter(Float64Array.from(header.initial_soft))
@@ -86,7 +86,7 @@ export function* replayFrames(mj, m, header, frames) {
       }
       for (let a = 0; a < header.nu; a++) d.ctrl[a] = frames[o + field.action.offset + a]
       for (let s = 0; s < header.steps_per_control; s++) {
-        if (soft) soft.step(d)
+        if (soft) { mj.mj_kinematics(m, d); soft.step(d) } // as TaskSim.step
         mj.mj_step(m, d)
       }
     }

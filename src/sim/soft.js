@@ -16,11 +16,18 @@ const SUBSTEPS = 2              // per MuJoCo step (1 ms at the default 2 ms ste
 const ITERATIONS = 2            // constraint passes per substep
 const MAX_LIFT = 0.02           // a particle is pushed out of a collider by at most this per substep (tunnelling guard)
 const SOFT_PRIORITY = 2         // like the rigid objects: a higher-priority geom's friction wins (the chute), a tie takes the larger
-// Reaction on MuJoCo bodies: a 3 g particle cannot stop a 400 g parcel through impulse exchange (it jitters and
-// the parcel sinks through), so the normal reaction is a damped penalty on how deep the body pushed into the
-// particle this substep, and only the tangential (friction) part is the particle's impulse.
-export const REACTION = { stiffness: 500, damping: 2, friction: 1 } // N/m per contact, N s/m per contact, impulse fraction (stiffer bounces: measured)
+// Reaction on MuJoCo bodies: the normal part is a penalty on how far a contact pushed the sample this substep,
+// with stiffness REACTION_SCALE x (sample mass / substep^2): that is REACTION_SCALE times the impulse the
+// sample actually received, so the transferred force is consistent across bag mass and timestep (at rest it
+// is REACTION_SCALE x the resting weight on the body). The full impulse is an explicit, stiff exchange that
+// bounces a 400 g box and launches it (measured, with and without low-pass filtering); 0.15 is stable for the
+// bodies in these scenes. The tangential (friction) part is the sample's impulse as a force over the step.
+export const REACTION_SCALE = 0.15
 export const DEBUG = { on: false, contacts: 0, lift: 0, slip: 0, fric: 0, surf: [0, 0, 0], mu: 0, track: -1, log: [] }
+// Collision samples: the particles plus, on every surface triangle, its centroid and three edge midpoints.
+// Particles alone (radius 4 mm, spacing 25 mm) let a 17 mm finger pass between them and impale the bag.
+const SURFACE_SAMPLES = [[1 / 3, 1 / 3, 1 / 3], [0.5, 0.5, 0], [0, 0.5, 0.5], [0.5, 0, 0.5]]
+const NEAR = 0.03               // a triangle's samples are only tested against a collider one of its vertices is this close to
 const PLANE = 0, SPHERE = 2, CAPSULE = 3, CYLINDER = 5, BOX = 6, MESH = 7
 const IDENTITY = Float64Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1])
 
@@ -118,6 +125,11 @@ export class SoftBody {
     this.x = new Float64Array(3 * n)
     this.xPrev = new Float64Array(3 * n)
     this.v = new Float64Array(3 * n)
+    // (vertex a, b, c, weights) per surface sample, for collision
+    const tris = this.lattice.surface
+    this.samples = []
+    for (let t = 0; t < tris.length; t += 3) for (const w of SURFACE_SAMPLES) this.samples.push([tris[t], tris[t + 1], tris[t + 2], w[0], w[1], w[2]])
+    this.near = new Uint8Array(this.n) // per collider pass: particles within NEAR of it
     this.lambdaEdge = new Float64Array(this.lattice.restLen.length)
     this.lambdaVol = new Float64Array(this.lattice.restVol.length)
     this.aabb = new Float64Array(6)
@@ -126,7 +138,7 @@ export class SoftBody {
   }
 
   /** mass (kg), friction, edge/volume compliance (m/N; larger = softer), damping (1/s) */
-  setPhysics({ mass = this.def.mass ?? 0.3, friction = this.def.friction ?? 0.6, edgeCompliance = this.def.edgeCompliance ?? 2e-3, volumeCompliance = this.def.volumeCompliance ?? 2e-2, damping = this.def.damping ?? 1 } = {}) {
+  setPhysics({ mass = this.def.mass ?? 0.3, friction = this.def.friction ?? 0.6, edgeCompliance = this.def.edgeCompliance ?? 2e-3, volumeCompliance = this.def.volumeCompliance ?? 1e-7, damping = this.def.damping ?? 1 } = {}) {
     this.params = { mass, friction, edgeCompliance, volumeCompliance, damping }
     this.invMass = this.n / mass
   }
@@ -280,8 +292,11 @@ export class SoftWorld {
     this.handOfBody = handOfBody ?? new Int8Array(m.nbody).fill(-1)
     this.touching = new Uint8Array(2)
     this.colliders = this.buildColliders()
-    this.force = new Float64Array(6 * m.nbody)   // accumulated per MuJoCo step, then written to xfrc_applied
+    this.force = new Float64Array(6 * m.nbody)   // reaction this step, written to xfrc_applied
+    this.dtStep = m.opt.timestep
     this.vel = new Float64Array(6)
+    this.pt = new Float64Array(3)
+    this.prev = new Float64Array(3)
     this.out = new Float64Array(4)
     this.local = [0, 0, 0]
     this.worldN = [0, 0, 0]
@@ -300,9 +315,12 @@ export class SoftWorld {
       const gname = this.mj.mj_id2name(m, this.mj.mjtObj.mjOBJ_GEOM.value, g) ?? ''
       const belt = this.belts.findIndex(prefix => gname.startsWith(prefix))
       if (belt >= 0 && type === CYLINDER) { rollers[belt].push(g); continue }
+      // dynamic: some joint moves this body (a static fixture gets no reaction force and no velocity read)
+      let dynamic = false
+      for (let b = m.geom_bodyid[g]; b > 0; b = m.body_parentid[b]) if (m.body_dofnum[b] > 0) { dynamic = true; break }
       const c = {
         geom: g, body: m.geom_bodyid[g], type, size: Array.from(m.geom_size.subarray(3 * g, 3 * g + 3)),
-        friction: m.geom_friction[3 * g], priority: m.geom_priority[g], dynamic: m.body_dofnum[m.geom_bodyid[g]] > 0 || m.body_rootid[m.geom_bodyid[g]] !== 0,
+        priority: m.geom_priority[g], dynamic, // friction is read at contact time: it is randomized per episode
         radius: 0, // bounding radius about the geom origin, for the broad phase
       }
       if (type === MESH) {
@@ -340,11 +358,12 @@ export class SoftWorld {
       // the belt surface: a static box spanning the rollers (axis along world x), top at the rollers' top,
       // moving at the first roller's rim speed
       const g0 = geoms[0], b0 = m.geom_bodyid[g0]
+      if (geoms.some(g => m.body_parentid[m.geom_bodyid[g]] !== 0)) throw new Error('soft: belt rollers must be direct children of the world body')
       const R = m.geom_size[3 * g0], halfLen = m.geom_size[3 * g0 + 1]
       const ys = geoms.map(g => m.body_pos[3 * m.geom_bodyid[g] + 1])
       const yc = (Math.min(...ys) + Math.max(...ys)) / 2, halfY = (Math.max(...ys) - Math.min(...ys)) / 2 + R
       list.push({
-        geom: g0, body: b0, type: BOX, size: [halfLen, halfY, R], friction: m.geom_friction[3 * g0], priority: m.geom_priority[g0],
+        geom: g0, body: b0, type: BOX, size: [halfLen, halfY, R], priority: m.geom_priority[g0],
         dynamic: false, radius: Math.sqrt(halfLen * halfLen + halfY * halfY + R * R),
         virtual: { pos: [m.body_pos[3 * b0], yc, m.body_pos[3 * b0 + 2]], spinBody: b0, spinRadius: R },
       })
@@ -377,7 +396,8 @@ export class SoftWorld {
    */
   step(d) {
     const { m } = this
-    const dt = m.opt.timestep / SUBSTEPS
+    this.dtStep = m.opt.timestep // one embind read per step, not per contact
+    const dt = this.dtStep / SUBSTEPS
     this.force.fill(0)
     this.touching.fill(0)
     this.maxPen = 0
@@ -454,12 +474,13 @@ export class SoftWorld {
 
   collide(b, d, dt) {
     const { m } = this
-    const { x, xPrev, n, params } = b
+    const { x, xPrev, n, params, samples } = b
     const aabb = b.aabb
     const r = PARTICLE_RADIUS
-    const out = this.out, local = this.local, wn = this.worldN, vel = this.vel
+    const out = this.out, local = this.local, wn = this.worldN, vel = this.vel, pt = this.pt, prev = this.prev
     const mass = params.mass / n
     const gx = d.geom_xpos
+    const total = n + samples.length
     for (const c of this.colliders) {
       const g3 = 3 * c.geom
       let cx, cy, cz, gm, g9
@@ -472,11 +493,32 @@ export class SoftWorld {
       }
       let touched = false
       let velRead = false
-      const mu = c.priority > SOFT_PRIORITY ? c.friction : c.priority < SOFT_PRIORITY ? params.friction : Math.max(params.friction, c.friction)
-      for (let i = 0; i < n; i++) {
-        const p = 3 * i
+      let anyNear = false
+      const near = b.near
+      const cf = m.geom_friction[g3]
+      const mu = c.priority > SOFT_PRIORITY ? cf : c.priority < SOFT_PRIORITY ? params.friction : Math.max(params.friction, cf)
+      for (let i = 0; i < total; i++) {
+        if (i === n && !anyNear) break // no particle near this collider: no triangle can touch it either
+        // the sample point and where it was at the start of the substep: a particle, or a point on a surface
+        // triangle (barycentric weights over its three vertices)
+        let sa, sb, sc, wa, wb, wc, wsum
+        if (i < n) {
+          const p = 3 * i
+          pt[0] = x[p]; pt[1] = x[p + 1]; pt[2] = x[p + 2]
+          prev[0] = xPrev[p]; prev[1] = xPrev[p + 1]; prev[2] = xPrev[p + 2]
+          sa = p; wa = 1; wsum = 1
+        } else {
+          const smp = samples[i - n]
+          if (!near[smp[0]] && !near[smp[1]] && !near[smp[2]]) continue
+          sa = 3 * smp[0]; sb = 3 * smp[1]; sc = 3 * smp[2]; wa = smp[3]; wb = smp[4]; wc = smp[5]
+          wsum = wa * wa + wb * wb + wc * wc
+          for (let k = 0; k < 3; k++) {
+            pt[k] = wa * x[sa + k] + wb * x[sb + k] + wc * x[sc + k]
+            prev[k] = wa * xPrev[sa + k] + wb * xPrev[sb + k] + wc * xPrev[sc + k]
+          }
+        }
         // world -> geom frame (xmat is row-major, columns are the geom axes): local = R^T (p - c)
-        const dx = x[p] - cx, dy = x[p + 1] - cy, dz = x[p + 2] - cz
+        const dx = pt[0] - cx, dy = pt[1] - cy, dz = pt[2] - cz
         let lx = gm[g9] * dx + gm[g9 + 3] * dy + gm[g9 + 6] * dz
         let ly = gm[g9 + 1] * dx + gm[g9 + 4] * dy + gm[g9 + 7] * dz
         let lz = gm[g9 + 2] * dx + gm[g9 + 5] * dy + gm[g9 + 8] * dz
@@ -487,6 +529,7 @@ export class SoftWorld {
         }
         local[0] = lx; local[1] = ly; local[2] = lz
         localDistance(c, local, out)
+        if (i < n) { const isNear = out[0] < NEAR; near[i] = isNear ? 1 : 0; if (isNear) anyNear = true }
         const pen = r - out[0]
         if (pen <= 0) continue
         if (pen > this.maxPen) this.maxPen = pen
@@ -501,8 +544,6 @@ export class SoftWorld {
         wn[1] = gm[g9 + 3] * nx + gm[g9 + 4] * ny + gm[g9 + 5] * nz
         wn[2] = gm[g9 + 6] * nx + gm[g9 + 7] * ny + gm[g9 + 8] * nz
         const lift = Math.min(pen, MAX_LIFT)
-        x[p] += wn[0] * lift; x[p + 1] += wn[1] * lift; x[p + 2] += wn[2] * lift
-        const px0 = x[p], py0 = x[p + 1], pz0 = x[p + 2] // after the normal push: what follows is friction
         // friction against the surface's own motion at the contact point. d.cvel is the body's spatial
         // velocity [angular, linear] in the world frame, taken at its kinematic tree's subtree centre of mass
         if (!velRead) {
@@ -520,31 +561,42 @@ export class SoftWorld {
         let sx = vel[3], sy = vel[4], sz = vel[5]
         if (c.dynamic) {
           const root = 3 * m.body_rootid[c.body]
-          const rx = x[p] - d.subtree_com[root], ry = x[p + 1] - d.subtree_com[root + 1], rz = x[p + 2] - d.subtree_com[root + 2]
+          const rx = pt[0] - d.subtree_com[root], ry = pt[1] - d.subtree_com[root + 1], rz = pt[2] - d.subtree_com[root + 2]
           sx += vel[1] * rz - vel[2] * ry; sy += vel[2] * rx - vel[0] * rz; sz += vel[0] * ry - vel[1] * rx
         }
-        // tangential slip over this substep relative to the surface
-        let tx = (x[p] - xPrev[p]) - sx * dt, ty = (x[p + 1] - xPrev[p + 1]) - sy * dt, tz = (x[p + 2] - xPrev[p + 2]) - sz * dt
+        // correction of the sample point: out along the normal, then the tangential slip relative to the
+        // surface removed up to the Coulomb limit
+        let mx = wn[0] * lift, my = wn[1] * lift, mz = wn[2] * lift
+        let tx = (pt[0] + mx - prev[0]) - sx * dt, ty = (pt[1] + my - prev[1]) - sy * dt, tz = (pt[2] + mz - prev[2]) - sz * dt
         const tn = tx * wn[0] + ty * wn[1] + tz * wn[2]
         tx -= tn * wn[0]; ty -= tn * wn[1]; tz -= tn * wn[2]
         const slip = Math.sqrt(tx * tx + ty * ty + tz * tz)
         if (slip > 1e-12) {
           const limit = mu * lift
           const k = slip <= limit ? 1 : limit / slip
-          x[p] -= tx * k; x[p + 1] -= ty * k; x[p + 2] -= tz * k
+          mx -= tx * k; my -= ty * k; mz -= tz * k
           if (DEBUG.on) { DEBUG.slip += slip; DEBUG.fric += slip * k }
         }
         if (DEBUG.on) { DEBUG.contacts++; DEBUG.lift += lift; DEBUG.surf = [sx, sy, sz]; DEBUG.mu = mu; if (i === DEBUG.track) DEBUG.log.push(`    contact geom ${c.geom} type ${c.type} pen ${(pen * 1e6).toFixed(1)}um n=${wn.map(v => v.toFixed(3))} surf=${[sx, sy, sz].map(v => v.toFixed(4))} slip=${(slip * 1e6).toFixed(1)}um limit=${(mu * lift * 1e6).toFixed(1)}um`) }
+        // apply to the vertices (a point on a triangle moves its vertices by their weights)
+        if (i < n) { x[sa] += mx; x[sa + 1] += my; x[sa + 2] += mz }
+        else {
+          const ka = wa / wsum, kb = wb / wsum, kc = wc / wsum
+          x[sa] += mx * ka; x[sa + 1] += my * ka; x[sa + 2] += mz * ka
+          x[sb] += mx * kb; x[sb + 1] += my * kb; x[sb + 2] += mz * kb
+          x[sc] += mx * kc; x[sc + 1] += my * kc; x[sc + 2] += mz * kc
+        }
         touched = true
-        // reaction on the body: penalty on the push depth along the normal (plus damping against the
-        // approach speed), and the friction impulse as a force over the MuJoCo step
+        // reaction on the body (see REACTION_SCALE): penalty along the normal on this substep's push, the
+        // friction impulse as a force over the MuJoCo step; the sample carries one particle's mass or the
+        // triangle's share
         if (c.dynamic) {
-          const vn = ((x[p] - xPrev[p]) / dt - sx) * wn[0] + ((x[p + 1] - xPrev[p + 1]) / dt - sy) * wn[1] + ((x[p + 2] - xPrev[p + 2]) / dt - sz) * wn[2]
-          const fn = -(REACTION.stiffness * lift + Math.max(0, -REACTION.damping * vn)) / SUBSTEPS
-          const scale = -REACTION.friction * mass / (dt * m.opt.timestep)
-          const fx = (x[p] - px0) * scale + fn * wn[0], fy = (x[p + 1] - py0) * scale + fn * wn[1], fz = (x[p + 2] - pz0) * scale + fn * wn[2]
+          const ms = i < n ? mass : mass / wsum
+          const fn = -REACTION_SCALE * ms * lift / (dt * dt) / SUBSTEPS
+          const scale = -ms / (dt * this.dtStep)
+          const fx = (mx - wn[0] * lift) * scale + fn * wn[0], fy = (my - wn[1] * lift) * scale + fn * wn[1], fz = (mz - wn[2] * lift) * scale + fn * wn[2]
           const ix = d.xipos[3 * c.body], iy = d.xipos[3 * c.body + 1], iz = d.xipos[3 * c.body + 2]
-          const ax = x[p] - ix, ay = x[p + 1] - iy, az = x[p + 2] - iz
+          const ax = pt[0] - ix, ay = pt[1] - iy, az = pt[2] - iz
           const f = this.force, o = 6 * c.body
           f[o] += fx; f[o + 1] += fy; f[o + 2] += fz
           f[o + 3] += ay * fz - az * fy; f[o + 4] += az * fx - ax * fz; f[o + 5] += ax * fy - ay * fx
@@ -557,43 +609,65 @@ export class SoftWorld {
     }
   }
 
-  // Particle-sphere repulsion between bodies whose boxes overlap (both move, equal masses per pair)
+  // Bag-bag contact: every sample of one bag is kept out of the other bag's bounding box (both ways, half the
+  // depth each). Coarse (a bag is treated as its box by the other), but two bags stack and push instead of
+  // merging.
   softContacts(active, dt) {
-    const r2 = 2 * PARTICLE_RADIUS
+    const r = PARTICLE_RADIUS
+    const pt = this.pt
     for (let a = 0; a < active.length; a++) for (let b = a + 1; b < active.length; b++) {
       const A = active[a], B = active[b]
       const ba = A.aabb, bb = B.aabb
-      if (ba[3] + r2 < bb[0] || bb[3] + r2 < ba[0] || ba[4] + r2 < bb[1] || bb[4] + r2 < ba[1] || ba[5] + r2 < bb[2] || bb[5] + r2 < ba[2]) continue
-      const wa = A.invMass, wb = B.invMass, wsum = wa + wb
-      for (let i = 0; i < A.n; i++) {
-        const p = 3 * i
-        const px = A.x[p], py = A.x[p + 1], pz = A.x[p + 2]
-        if (px + r2 < bb[0] || px - r2 > bb[3] || py + r2 < bb[1] || py - r2 > bb[4] || pz + r2 < bb[2] || pz - r2 > bb[5]) continue
-        for (let j = 0; j < B.n; j++) {
-          const q = 3 * j
-          const dx = px - B.x[q], dy = py - B.x[q + 1], dz = pz - B.x[q + 2]
-          const d2 = dx * dx + dy * dy + dz * dz
-          if (d2 >= r2 * r2 || d2 < 1e-16) continue
-          const dist = Math.sqrt(d2)
-          const corr = (r2 - dist) / dist
-          A.x[p] += dx * corr * wa / wsum; A.x[p + 1] += dy * corr * wa / wsum; A.x[p + 2] += dz * corr * wa / wsum
-          B.x[q] -= dx * corr * wb / wsum; B.x[q + 1] -= dy * corr * wb / wsum; B.x[q + 2] -= dz * corr * wb / wsum
+      if (ba[3] + r < bb[0] || bb[3] + r < ba[0] || ba[4] + r < bb[1] || bb[4] + r < ba[1] || ba[5] + r < bb[2] || bb[5] + r < ba[2]) continue
+      for (const [S, box] of [[A, bb], [B, ba]]) {
+        const { x, n, samples } = S
+        const total = n + samples.length
+        const hx = (box[3] - box[0]) / 2, hy = (box[4] - box[1]) / 2, hz = (box[5] - box[2]) / 2
+        const cx = (box[3] + box[0]) / 2, cy = (box[4] + box[1]) / 2, cz = (box[5] + box[2]) / 2
+        for (let i = 0; i < total; i++) {
+          let sa, sb, sc, wa, wb, wc, wsum
+          if (i < n) { sa = 3 * i; wa = 1; wsum = 1; pt[0] = x[sa]; pt[1] = x[sa + 1]; pt[2] = x[sa + 2] }
+          else {
+            const smp = samples[i - n]
+            sa = 3 * smp[0]; sb = 3 * smp[1]; sc = 3 * smp[2]; wa = smp[3]; wb = smp[4]; wc = smp[5]
+            wsum = wa * wa + wb * wb + wc * wc
+            for (let k = 0; k < 3; k++) pt[k] = wa * x[sa + k] + wb * x[sb + k] + wc * x[sc + k]
+          }
+          const qx = Math.abs(pt[0] - cx) - hx, qy = Math.abs(pt[1] - cy) - hy, qz = Math.abs(pt[2] - cz) - hz
+          if (qx > r || qy > r || qz > r) continue
+          // inside (or within r of) the box: out through the nearest face, half the depth
+          let mx = 0, my = 0, mz = 0
+          if (qx >= qy && qx >= qz) mx = (pt[0] >= cx ? 1 : -1) * (r - qx) / 2
+          else if (qy >= qz) my = (pt[1] >= cy ? 1 : -1) * (r - qy) / 2
+          else mz = (pt[2] >= cz ? 1 : -1) * (r - qz) / 2
+          if (i < n) { x[sa] += mx; x[sa + 1] += my; x[sa + 2] += mz }
+          else {
+            const ka = wa / wsum, kb = wb / wsum, kc = wc / wsum
+            x[sa] += mx * ka; x[sa + 1] += my * ka; x[sa + 2] += mz * ka
+            x[sb] += mx * kb; x[sb + 1] += my * kb; x[sb + 2] += mz * kb
+            x[sc] += mx * kc; x[sc + 1] += my * kc; x[sc + 2] += mz * kc
+          }
         }
       }
-      for (const S of [A, B]) for (let i = 0; i < 3 * S.n; i++) S.v[i] = (S.x[i] - S.xPrev[i]) / dt
+      for (const S of [A, B]) {
+        const damp = Math.max(0, 1 - S.params.damping * dt)
+        for (let i = 0; i < 3 * S.n; i++) S.v[i] = (S.x[i] - S.xPrev[i]) / dt * damp
+        S.updateAabb()
+      }
     }
   }
 
   /** Deepest particle penetration into any collider at the current state (m), without moving anything. */
   measurePenetration(d) {
     const saved = this.bodies.map(b => ({ x: Float64Array.from(b.x), xPrev: Float64Array.from(b.xPrev), v: Float64Array.from(b.v), aabb: Float64Array.from(b.aabb) }))
-    const force = Float64Array.from(this.force)
+    const force = Float64Array.from(this.force), touching = Uint8Array.from(this.touching)
     this.maxPen = 0
     const dt = this.m.opt.timestep / SUBSTEPS
     for (const b of this.bodies) if (b.active) { b.updateAabb(); this.collide(b, d, dt) }
     const pen = this.maxPen
     this.bodies.forEach((b, i) => { b.x.set(saved[i].x); b.xPrev.set(saved[i].xPrev); b.v.set(saved[i].v); b.aabb.set(saved[i].aabb) })
     this.force.set(force)
+    this.touching.set(touching)
     return pen
   }
 

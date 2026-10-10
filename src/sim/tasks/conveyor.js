@@ -3,6 +3,7 @@
 // output belt (robot's right), which carries it away. One episode = a fixed number of packages drawn from a
 // pool of rigid cardboard boxes (MuJoCo bodies) and soft poly-mailer bags (XPBD, see soft.js).
 import { LAYOUT } from './conveyor.layout.js'
+import { pickPlaceKeys, sampleKeys } from '../autopilot.js'
 
 const { pool: POOL, beltX: BELT_X, beltTop: BELT_TOP, rollerRadius: ROLLER_R, spawn: SPAWN, chuteNormal: CHUTE_N, plateY: PLATE_Y, exitY: EXIT_Y, outputStartY: OUTPUT_START_Y, sizes: SIZES } = LAYOUT
 const PACKAGES_PER_EPISODE = 5
@@ -70,6 +71,14 @@ const itemPark = (sim, it) => it.kind === 'soft' ? sim.teleportSoft(it.name, PAR
 const onBelt = (it, n) => [BELT_X, OUTPUT_START_Y - 0.08 - 0.14 * n, BELT_TOP + it.half[2] + (it.kind === 'soft' ? 0.004 : 0.002)]
 
 const round = (x, p = 3) => Number(x.toFixed(p))
+
+// Parks every spawned package and cancels the rest of the plan (headless contact cases)
+function clearPlan(sim) {
+  const st = sim.taskState
+  for (const a of st.active) itemPark(sim, ITEMS[a.item])
+  st.active = []
+  st.spawned = st.order.length
+}
 
 export default {
   name: 'conveyor',
@@ -215,6 +224,94 @@ export default {
     st.spawned = st.order.length
     return { outcome: 'partial', result: r => r.delivered.every(d => d.outcome === 'wrong_face') }
   },
+
+  // Headless contact cases (scripted, recorded and replayed by sim-check): the soft parcels meeting a hand, a
+  // box and each other. Each clears the spawn plan first so nothing slides into the test.
+  contactCases: [
+    {
+      // the operator's most common bag contact: pressing on it, pushing it along, letting go
+      name: 'left hand presses into a bag, drags it along the plate and lifts off clean',
+      duration: 12,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportSoft('bag0', [0.3, 0.2, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+        sim.caseStats = { maxZ: 0 }
+      },
+      hands(sim, t) {
+        const r = sim.readyGrip[0], cx = 0.3, cy = 0.2, top = BELT_TOP + 2 * BAGS.bag0.half[2]
+        const keys = [
+          [0, ...r, 0, 0], [2.5, ...r, 0, 0], [4, cx, cy, top + 0.12, 0, 0], [5.5, cx, cy, top - 0.02, 0, 0], [6.5, cx, cy, top - 0.02, 0, 0],
+          [8.5, cx + 0.08, cy, top - 0.02, 0, 0], [9.5, cx + 0.08, cy, top - 0.02, 0, 0], [11, cx + 0.08, cy, top + 0.15, 0, 0], [13, ...r, 0, 0],
+        ]
+        if (sim.caseStats && t > 10.5) sim.caseStats.maxZ = Math.max(sim.caseStats.maxZ, sim.softPos('bag0')[2])
+        return [sampleKeys(keys, t), null]
+      },
+      check(sim) {
+        const [x, , z] = sim.softPos('bag0')
+        if (!sim.soft.byName.bag0.finite()) return 'bag went non-finite'
+        if (x - 0.3 < 0.02) return `bag was not dragged along (moved ${(x - 0.3).toFixed(3)} m)`
+        if (sim.caseStats.maxZ > BELT_TOP + 0.06 || z > BELT_TOP + 0.04) return `bag came up with the hand (centroid z ${sim.caseStats.maxZ.toFixed(3)})`
+        return null
+      },
+      describe: sim => `dragged ${(sim.softPos('bag0')[0] - 0.3).toFixed(3)} m, rests at z ${sim.softPos('bag0')[2].toFixed(3)} after lift-off`,
+    },
+    {
+      // fingers close on the bag's edge and the hand carries it over; the soft edge may slip, the bag must
+      // still come along and come off the fingers at the end
+      name: 'left hand pinches a bag by its edge, carries it and lets go',
+      duration: 15,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportSoft('bag0', [0.3, 0.17, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+      },
+      hands(sim, t) {
+        const z = BELT_TOP + BAGS.bag0.half[2] + 0.004
+        return [sampleKeys(pickPlaceKeys(0, sim.readyGrip[0], [0.3, 0.17 + 0.05, z], [0.3, 0.02, z], { t0: 2.5, lift: 0.12 }), t), null]
+      },
+      check(sim) {
+        const [, y, z] = sim.softPos('bag0')
+        if (!sim.soft.byName.bag0.finite()) return 'bag went non-finite'
+        if (y > 0.1) return `bag was not carried (y ${y.toFixed(3)})`
+        if (z > BELT_TOP + 0.04 || sim.touching[0]) return `bag stayed on the hand (z ${z.toFixed(3)}, touching ${sim.touching[0]})`
+        return null
+      },
+      describe: sim => `bag ends at ${sim.softPos('bag0').map(v => v.toFixed(3))}`,
+    },
+    {
+      name: 'a box dropped on a bag rests on it',
+      duration: 5,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportSoft('bag0', [0.35, 0.15, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+        sim.teleportObject(0, [0.35, 0.15, BELT_TOP + 2 * BAGS.bag0.half[2] + SIZES[0][2] + 0.01])
+      },
+      hands(sim) { return [[...sim.readyGrip[0], 0, 0], null] },
+      check(sim) {
+        const z = sim.objectPos(0)[2] - SIZES[0][2]
+        if (z < BELT_TOP + 0.015) return `box sank through the bag (bottom ${z.toFixed(3)})`
+        if (sim.objectSpeed(0) > 0.05) return `box never came to rest (${sim.objectSpeed(0).toFixed(3)} m/s)`
+        return null
+      },
+      describe: sim => `box bottom ${(sim.objectPos(0)[2] - SIZES[0][2] - BELT_TOP).toFixed(3)} above the plate, ${sim.objectSpeed(0).toFixed(3)} m/s`,
+    },
+    {
+      name: 'a bag dropped on a bag stacks',
+      duration: 4,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportSoft('bag0', [0.35, 0.15, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+        sim.teleportSoft('bag1', [0.37, 0.17, BELT_TOP + 2 * BAGS.bag0.half[2] + BAGS.bag1.half[2] + 0.02], [Math.cos(0.15), 0, 0, Math.sin(0.15)], true)
+      },
+      hands(sim) { return [[...sim.readyGrip[0], 0, 0], null] },
+      check(sim) {
+        const z = sim.softPos('bag1')[2]
+        if (z < BELT_TOP + 0.055) return `upper bag merged into the lower one (centroid z ${z.toFixed(3)})`
+        if (sim.softSpeed('bag1') > 0.05) return `bags never settled (${sim.softSpeed('bag1').toFixed(3)} m/s)`
+        return null
+      },
+      describe: sim => `upper bag centroid ${sim.softPos('bag1')[2].toFixed(3)}`,
+    },
+  ],
 
   // Headless check: packages already turned label-up on the output belt; the belt must carry them off and score them
   solved(sim) {

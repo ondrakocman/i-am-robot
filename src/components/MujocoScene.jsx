@@ -400,14 +400,15 @@ function geomGeometry(g, meshes, cache, override) {
   }
 }
 
-// Soft parcel particle positions from the worker (world frame): parked bodies (far below the floor) are hidden
+// Soft parcel particle positions from the worker (world frame): parked bodies (on the floor far behind the
+// robot, first particle z under 0.5 m) are hidden
 function applySoft(world, positions) {
   let o = 0
   for (const { mesh, n } of world.softMeshes) {
     const attr = mesh.geometry.attributes.position
     attr.array.set(positions.subarray(o, o + 3 * n))
     attr.needsUpdate = true
-    mesh.visible = positions[o + 2] > 0
+    mesh.visible = positions[o + 2] > 0.5
     if (mesh.visible) mesh.geometry.computeVertexNormals()
     o += 3 * n
   }
