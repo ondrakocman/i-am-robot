@@ -3,7 +3,7 @@
 // output belt (robot's right), which carries it away. One episode = a fixed number of packages drawn from a
 // pool of rigid cardboard boxes (MuJoCo bodies) and soft poly-mailer bags (XPBD, see soft.js).
 import { LAYOUT } from './conveyor.layout.js'
-import { pickPlaceKeys, sampleKeys } from '../autopilot.js'
+import { sampleKeys } from '../autopilot.js'
 
 const { pool: POOL, beltX: BELT_X, beltTop: BELT_TOP, rollerRadius: ROLLER_R, spawn: SPAWN, chuteNormal: CHUTE_N, plateY: PLATE_Y, exitY: EXIT_Y, outputStartY: OUTPUT_START_Y, sizes: SIZES } = LAYOUT
 const PACKAGES_PER_EPISODE = 5
@@ -87,6 +87,7 @@ export default {
   scene: 'mujoco/conveyor.xml',
   objects: Array.from({ length: POOL }, (_, i) => `package${i}`),
   soft: { bodies: BAGS, belts: ['belt_out_roller'] },
+  timesteps: [0.002], // the soft coupling (soft.js) is tuned for this step
   timeout: 150,
   materials: {
     cardboard: { roughness: 0.95 },
@@ -229,70 +230,102 @@ export default {
   // box and each other. Each clears the spawn plan first so nothing slides into the test.
   contactCases: [
     {
-      // the operator's most common bag contact: pressing on it, pushing it along, letting go
-      name: 'left hand presses into a bag, drags it along the plate and lifts off clean',
-      duration: 12,
+      // the operator's most common bag contacts: pressing on it (the hand must come away clean, the bag must
+      // spring back) and pushing it along the plate from the side (friction against the plate). Pressing and
+      // dragging does not move a bag whose skin friction is the same on both sides: the plate carries the
+      // extra weight, so the hand slides over the bag instead
+      name: 'left hand presses into a bag, lifts off clean, then pushes it along the plate',
+      duration: 14,
       setup(sim) {
         clearPlan(sim)
         sim.teleportSoft('bag0', [0.3, 0.2, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
         sim.caseStats = { maxZ: 0 }
       },
       hands(sim, t) {
-        const r = sim.readyGrip[0], cx = 0.3, cy = 0.2, top = BELT_TOP + 2 * BAGS.bag0.half[2]
+        const r = sim.readyGrip[0], cx = 0.3, cy = 0.2, top = BELT_TOP + 2 * BAGS.bag0.half[2], mid = BELT_TOP + BAGS.bag0.half[2] // push at the bag's centre height: higher tips it
         const keys = [
-          [0, ...r, 0, 0], [2.5, ...r, 0, 0], [4, cx, cy, top + 0.12, 0, 0], [5.5, cx, cy, top - 0.02, 0, 0], [6.5, cx, cy, top - 0.02, 0, 0],
-          [8.5, cx + 0.08, cy, top - 0.02, 0, 0], [9.5, cx + 0.08, cy, top - 0.02, 0, 0], [11, cx + 0.08, cy, top + 0.15, 0, 0], [13, ...r, 0, 0],
+          [0, ...r, 0, 0], [2.5, ...r, 0, 0], [4, cx, cy, top + 0.12, 0, 0], [5.5, cx, cy, top - 0.03, 0, 0], [6.5, cx, cy, top - 0.03, 0, 0],
+          [7.5, cx, cy, top + 0.12, 0, 0], [9, cx - 0.16, cy, mid + 0.08, 0, 0], [10, cx - 0.16, cy, mid, 0, 0], [12, cx - 0.04, cy, mid, 0, 0],
+          [13, cx - 0.04, cy, mid + 0.12, 0, 0], [15, ...r, 0, 0],
         ]
-        if (sim.caseStats && t > 10.5) sim.caseStats.maxZ = Math.max(sim.caseStats.maxZ, sim.softPos('bag0')[2])
+        if (sim.caseStats && t > 7 && t < 9) sim.caseStats.maxZ = Math.max(sim.caseStats.maxZ, sim.softPos('bag0')[2]) // after the press
         return [sampleKeys(keys, t), null]
       },
       check(sim) {
         const [x, , z] = sim.softPos('bag0')
-        if (!sim.soft.byName.bag0.finite()) return 'bag went non-finite'
-        if (x - 0.3 < 0.02) return `bag was not dragged along (moved ${(x - 0.3).toFixed(3)} m)`
-        if (sim.caseStats.maxZ > BELT_TOP + 0.06 || z > BELT_TOP + 0.04) return `bag came up with the hand (centroid z ${sim.caseStats.maxZ.toFixed(3)})`
+        const bag = sim.soft.byName.bag0
+        if (!bag.finite()) return 'bag went non-finite'
+        if (sim.caseStats.maxZ > BELT_TOP + 0.06) return `bag came up with the hand after the press (centroid z ${sim.caseStats.maxZ.toFixed(3)})`
+        if (x - 0.3 < 0.04) return `bag was not pushed along (moved ${(x - 0.3).toFixed(3)} m)`
+        if (z > BELT_TOP + 0.04 || sim.touching[0]) return `bag did not stay on the plate (z ${z.toFixed(3)}, touching ${sim.touching[0]})`
+        const { volume, inverted } = bag.volumeState()
+        if (inverted > 0 || volume < 0.9) return `bag stayed crushed (${inverted} inverted tets, ${(volume * 100).toFixed(0)}% of rest volume)`
+        if (sim.softUp('bag0') < TAG_UP) return `bag no longer reads label-up (${sim.softUp('bag0').toFixed(3)})`
         return null
       },
-      describe: sim => `dragged ${(sim.softPos('bag0')[0] - 0.3).toFixed(3)} m, rests at z ${sim.softPos('bag0')[2].toFixed(3)} after lift-off`,
+      describe: sim => `pushed ${(sim.softPos('bag0')[0] - 0.3).toFixed(3)} m, rests at z ${sim.softPos('bag0')[2].toFixed(3)} with ${(sim.soft.byName.bag0.volumeState().volume * 100).toFixed(0)}% of its volume`,
     },
     {
-      // fingers close on the bag's edge and the hand carries it over; the soft edge may slip, the bag must
-      // still come along and come off the fingers at the end
-      name: 'left hand pinches a bag by its edge, carries it and lets go',
+      // the hand reaches over the bag, closes on it, drags it along the plate to the drop point, opens and
+      // moves away. A pinch does not lift a flat poly bag with this hand (the edge slips out as the hand
+      // rises; the fitted-box colliders that once "held" it were trapping it); lifting takes a scoop from
+      // underneath, which the keyframe script cannot do, so this case checks the squeeze, the carry and a
+      // clean release
+      name: 'left hand closes on a bag, carries it along the plate and lets go clean',
       duration: 15,
       setup(sim) {
         clearPlan(sim)
         sim.teleportSoft('bag0', [0.3, 0.17, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+        sim.caseStats = { squeezed: false, lowestVolume: 1 }
       },
       hands(sim, t) {
-        const z = BELT_TOP + BAGS.bag0.half[2] + 0.004
-        return [sampleKeys(pickPlaceKeys(0, sim.readyGrip[0], [0.3, 0.17 + 0.05, z], [0.3, 0.02, z], { t0: 2.5, lift: 0.12 }), t), null]
+        const r = sim.readyGrip[0]
+        const z = BELT_TOP + BAGS.bag0.half[2] + 0.004 + 0.012, fx = 0.3, fy = 0.17 + BAGS.bag0.half[1] - 0.12
+        const keys = [
+          [0, ...r, 0, 0], [2.5, ...r, 0, 0], [3.5, fx, fy + 0.09, z + 0.12, 0, 0], [4.5, fx, fy + 0.09, z, 0, 0], [5.5, fx, fy + 0.012, z, 0, 0],
+          [6.7, fx, fy + 0.012, z, 0, 0], [7.5, fx, fy + 0.012, z, 0, 1], [8.5, fx, fy + 0.012, z + 0.04, 0, 1], [10.5, 0.34, 0.06, z + 0.04, 0, 1],
+          [11.5, 0.34, 0.06, z + 0.02, 0, 1], [12.1, 0.34, 0.06, z + 0.02, 0, 0], [13.5, 0.34, 0.06, z + 0.17, 0, 0], [15, 0.36, 0.25, 1.0, 0, 0],
+        ]
+        if (sim.caseStats && t > 7.5 && t < 11.5) {
+          if (sim.touching[0]) sim.caseStats.squeezed = true
+          sim.caseStats.lowestVolume = Math.min(sim.caseStats.lowestVolume, sim.soft.byName.bag0.volumeState().volume)
+        }
+        return [sampleKeys(keys, t), null]
       },
       check(sim) {
         const [, y, z] = sim.softPos('bag0')
-        if (!sim.soft.byName.bag0.finite()) return 'bag went non-finite'
+        const bag = sim.soft.byName.bag0
+        if (!bag.finite()) return 'bag went non-finite'
+        if (!sim.caseStats.squeezed) return 'the closed hand never touched the bag'
         if (y > 0.1) return `bag was not carried (y ${y.toFixed(3)})`
         if (z > BELT_TOP + 0.04 || sim.touching[0]) return `bag stayed on the hand (z ${z.toFixed(3)}, touching ${sim.touching[0]})`
+        const { volume, inverted } = bag.volumeState()
+        if (inverted > 0 || volume < 0.9) return `bag stayed crushed after release (${inverted} inverted tets, ${(volume * 100).toFixed(0)}% of rest volume)`
         return null
       },
-      describe: sim => `bag ends at ${sim.softPos('bag0').map(v => v.toFixed(3))}`,
+      describe: sim => `squeezed to ${(sim.caseStats.lowestVolume * 100).toFixed(0)}% of its volume, ends at ${sim.softPos('bag0').map(v => v.toFixed(3))} with ${(sim.soft.byName.bag0.volumeState().volume * 100).toFixed(0)}%`,
     },
     {
       name: 'a box dropped on a bag rests on it',
-      duration: 5,
+      duration: 6,
       setup(sim) {
         clearPlan(sim)
         sim.teleportSoft('bag0', [0.35, 0.15, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
         sim.teleportObject(0, [0.35, 0.15, BELT_TOP + 2 * BAGS.bag0.half[2] + SIZES[0][2] + 0.01])
+        sim.caseStats = { maxSpeed: 0 }
       },
-      hands(sim) { return [[...sim.readyGrip[0], 0, 0], null] },
+      hands(sim, t) {
+        if (sim.caseStats && t > 7) sim.caseStats.maxSpeed = Math.max(sim.caseStats.maxSpeed, sim.objectSpeed(0)) // the last second
+        return [[...sim.readyGrip[0], 0, 0], null]
+      },
       check(sim) {
         const z = sim.objectPos(0)[2] - SIZES[0][2]
         if (z < BELT_TOP + 0.015) return `box sank through the bag (bottom ${z.toFixed(3)})`
-        if (sim.objectSpeed(0) > 0.05) return `box never came to rest (${sim.objectSpeed(0).toFixed(3)} m/s)`
+        if (Math.hypot(sim.objectPos(0)[0] - 0.35, sim.objectPos(0)[1] - 0.15) > 0.04) return `box slid off the bag`
+        if (sim.caseStats.maxSpeed > 0.05) return `box never came to rest (peak ${sim.caseStats.maxSpeed.toFixed(3)} m/s over the last second)`
         return null
       },
-      describe: sim => `box bottom ${(sim.objectPos(0)[2] - SIZES[0][2] - BELT_TOP).toFixed(3)} above the plate, ${sim.objectSpeed(0).toFixed(3)} m/s`,
+      describe: sim => `box bottom ${(sim.objectPos(0)[2] - SIZES[0][2] - BELT_TOP).toFixed(3)} above the plate, peak ${sim.caseStats.maxSpeed.toFixed(3)} m/s over the last second`,
     },
     {
       name: 'a bag dropped on a bag stacks',
@@ -306,7 +339,7 @@ export default {
       check(sim) {
         const z = sim.softPos('bag1')[2]
         if (z < BELT_TOP + 0.055) return `upper bag merged into the lower one (centroid z ${z.toFixed(3)})`
-        if (sim.softSpeed('bag1') > 0.05) return `bags never settled (${sim.softSpeed('bag1').toFixed(3)} m/s)`
+        if (sim.softSpeed('bag1') > 0.05 || sim.softSpeed('bag0') > 0.05) return `bags never settled (${sim.softSpeed('bag1').toFixed(3)} / ${sim.softSpeed('bag0').toFixed(3)} m/s)`
         return null
       },
       describe: sim => `upper bag centroid ${sim.softPos('bag1')[2].toFixed(3)}`,

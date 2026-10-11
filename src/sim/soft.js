@@ -3,17 +3,24 @@
 // deterministic (float64, fixed iteration order, sqrt only), so a recorded episode replays it bit for bit like
 // the rigid state.
 //
-// Coupling with MuJoCo is through its compiled geoms: every colliding geom (robot hull meshes as fitted boxes,
+// Coupling with MuJoCo is through its compiled geoms: every colliding geom (robot hull meshes as fitted 26-plane polytopes,
 // scene boxes, cylinders, planes, spheres, capsules, the rigid parcels) is a kinematic collider for the
-// particles, with Coulomb friction against the surface's actual velocity (a turning roller carries a bag), and
-// the contact impulses are applied back to MuJoCo bodies through xfrc_applied, so a hand carries the bag's
-// weight and a bag can push a rigid parcel. Soft-soft contact is particle-sphere repulsion when two bags'
-// bounding boxes overlap.
+// particles and surface samples, with Coulomb friction against the surface's actual velocity (a turning roller
+// carries a bag), and a reaction goes back to MuJoCo bodies through xfrc_applied (see REACTION_SCALE: a
+// documented fraction of the contact impulse, so a hand feels part of the bag's weight and a bag pushes a
+// rigid parcel). Soft-soft contact keeps each bag's samples out of the other bag's bounding box. A weak shape
+// match toward the undeformed lattice lets a crushed bag spring back instead of staying inverted.
+//
+// The solver constants below are part of what a recorded episode depends on (TaskSim writes them into the
+// header as soft_solver); the coupling is tuned for a 2 ms MuJoCo step, which the conveyor task pins.
 
 const GRAVITY = -9.81
 const PARTICLE_RADIUS = 0.004   // contact offset: a bag's skin
-const SUBSTEPS = 2              // per MuJoCo step (1 ms at the default 2 ms step)
+const SUBSTEPS = 2              // per MuJoCo step (1 ms at the 2 ms step the soft tasks pin)
 const ITERATIONS = 2            // constraint passes per substep
+const SHAPE_MATCH = 0.02        // per substep: pull toward the best-fit rigid placement of the rest lattice
+const LAYER_GAP = 0.5           // a particle column's layers keep at least this fraction of their rest spacing (no inverted lattice)
+const NORMAL_DAMPING = 1.0      // N s/m per contact sample on the body's approach speed (a box resting on a bag buzzes without it)
 const MAX_LIFT = 0.02           // a particle is pushed out of a collider by at most this per substep (tunnelling guard)
 const SOFT_PRIORITY = 2         // like the rigid objects: a higher-priority geom's friction wins (the chute), a tie takes the larger
 // Reaction on MuJoCo bodies: the normal part is a penalty on how far a contact pushed the sample this substep,
@@ -23,13 +30,30 @@ const SOFT_PRIORITY = 2         // like the rigid objects: a higher-priority geo
 // bounces a 400 g box and launches it (measured, with and without low-pass filtering); 0.15 is stable for the
 // bodies in these scenes. The tangential (friction) part is the sample's impulse as a force over the step.
 export const REACTION_SCALE = 0.15
+/** Everything in this file a replay depends on, for the episode header. */
+export const SOFT_SOLVER = { substeps: SUBSTEPS, iterations: ITERATIONS, particleRadius: PARTICLE_RADIUS, maxLift: MAX_LIFT, reactionScale: REACTION_SCALE, shapeMatch: SHAPE_MATCH, layerGap: LAYER_GAP, normalDamping: NORMAL_DAMPING, surfaceSamples: 4 }
 export const DEBUG = { on: false, contacts: 0, lift: 0, slip: 0, fric: 0, surf: [0, 0, 0], mu: 0, track: -1, log: [] }
 // Collision samples: the particles plus, on every surface triangle, its centroid and three edge midpoints.
 // Particles alone (radius 4 mm, spacing 25 mm) let a 17 mm finger pass between them and impale the bag.
 const SURFACE_SAMPLES = [[1 / 3, 1 / 3, 1 / 3], [0.5, 0.5, 0], [0, 0.5, 0.5], [0.5, 0, 0.5]]
 const NEAR = 0.03               // a triangle's samples are only tested against a collider one of its vertices is this close to
+export { NEAR }
 const PLANE = 0, SPHERE = 2, CAPSULE = 3, CYLINDER = 5, BOX = 6, MESH = 7
 const IDENTITY = Float64Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1])
+// Hull meshes are collided as a 26-plane polytope (axes, face diagonals, corner diagonals) fitted to the hull
+// vertices: a box fitted by PCA left up to 2.6 cm of air around the palm, enough to trap a bag between palm
+// and thumb. The signed distance is the largest plane distance: exact inside and near faces, a slight
+// underestimate near edges and corners.
+const DOP_DIRS = (() => {
+  const out = []
+  for (let x = -1; x <= 1; x++) for (let y = -1; y <= 1; y++) for (let z = -1; z <= 1; z++) {
+    if (!x && !y && !z) continue
+    const l = Math.sqrt(x * x + y * y + z * z)
+    out.push(x / l, y / l, z / l)
+  }
+  return Float64Array.from(out)
+})()
+const NDOP = DOP_DIRS.length / 3
 
 /** Lattice of (nx x ny x nz) cells over a box of half extents `half`: particles, distance and volume constraints,
  * surface triangles (the top face last, with UVs, so a label can be drawn on it). */
@@ -125,11 +149,29 @@ export class SoftBody {
     this.x = new Float64Array(3 * n)
     this.xPrev = new Float64Array(3 * n)
     this.v = new Float64Array(3 * n)
-    // (vertex a, b, c, weights) per surface sample, for collision
+    // surface samples for collision: triangle vertices (3 per sample) and barycentric weights
     const tris = this.lattice.surface
-    this.samples = []
-    for (let t = 0; t < tris.length; t += 3) for (const w of SURFACE_SAMPLES) this.samples.push([tris[t], tris[t + 1], tris[t + 2], w[0], w[1], w[2]])
+    const ns = (tris.length / 3) * SURFACE_SAMPLES.length
+    this.nSamples = ns
+    this.sampleIdx = new Int32Array(3 * ns)
+    this.sampleW = new Float64Array(3 * ns)
+    this.sampleWsum = new Float64Array(ns)
+    let k = 0
+    for (let t = 0; t < tris.length; t += 3) for (const w of SURFACE_SAMPLES) {
+      this.sampleIdx[3 * k] = tris[t]; this.sampleIdx[3 * k + 1] = tris[t + 1]; this.sampleIdx[3 * k + 2] = tris[t + 2]
+      this.sampleW[3 * k] = w[0]; this.sampleW[3 * k + 1] = w[1]; this.sampleW[3 * k + 2] = w[2]
+      this.sampleWsum[k] = w[0] * w[0] + w[1] * w[1] + w[2] * w[2]
+      k++
+    }
     this.near = new Uint8Array(this.n) // per collider pass: particles within NEAR of it
+    this.shape = { A: new Float64Array(9), S2: new Float64Array(9), V: new Float64Array(9), R: new Float64Array(9) }
+    // vertical particle columns (consecutive layers), for the ordering constraint
+    const [nx, ny, nz] = def.cells
+    this.columns = new Int32Array((nx + 1) * (ny + 1) * (nz + 1))
+    let col = 0
+    for (let i = 0; i <= nx; i++) for (let j = 0; j <= ny; j++) for (let kk = 0; kk <= nz; kk++) this.columns[col++] = (i * (ny + 1) + j) * (nz + 1) + kk
+    this.layers = nz + 1
+    this.layerSpacing = 2 * def.half[2] / nz
     this.lambdaEdge = new Float64Array(this.lattice.restLen.length)
     this.lambdaVol = new Float64Array(this.lattice.restVol.length)
     this.aabb = new Float64Array(6)
@@ -178,14 +220,85 @@ export class SoftBody {
 
   /** z component of the top face's outward normal: 1 label up, -1 label down. */
   up() {
-    const [a, b, , d] = this.lattice.topCorners
+    // mean (area-weighted) normal of the top face's triangles
     const { x } = this
-    const u = [x[3 * b] - x[3 * a], x[3 * b + 1] - x[3 * a + 1], x[3 * b + 2] - x[3 * a + 2]]
-    const v = [x[3 * d] - x[3 * a], x[3 * d + 1] - x[3 * a + 1], x[3 * d + 2] - x[3 * a + 2]]
-    const nz = u[0] * v[1] - u[1] * v[0]
-    const nx = u[1] * v[2] - u[2] * v[1], ny = u[2] * v[0] - u[0] * v[2]
+    const { surface, topStart } = this.lattice
+    let nx = 0, ny = 0, nz = 0
+    for (let t = topStart; t < surface.length; t += 3) {
+      const a = 3 * surface[t], b = 3 * surface[t + 1], c = 3 * surface[t + 2]
+      const ux = x[b] - x[a], uy = x[b + 1] - x[a + 1], uz = x[b + 2] - x[a + 2]
+      const vx = x[c] - x[a], vy = x[c + 1] - x[a + 1], vz = x[c + 2] - x[a + 2]
+      nx += uy * vz - uz * vy; ny += uz * vx - ux * vz; nz += ux * vy - uy * vx
+    }
     const len = Math.sqrt(nx * nx + ny * ny + nz * nz)
     return len > 0 ? nz / len : 0
+  }
+
+  /** Fraction of the rest volume the lattice currently encloses, and how many tetrahedra are inverted. */
+  volumeState() {
+    const { x } = this
+    const { tets, restVol } = this.lattice
+    let vol = 0, inverted = 0, rest = 0
+    for (let t = 0; t < restVol.length; t++) {
+      const i0 = 3 * tets[4 * t], i1 = 3 * tets[4 * t + 1], i2 = 3 * tets[4 * t + 2], i3 = 3 * tets[4 * t + 3]
+      const e1x = x[i1] - x[i0], e1y = x[i1 + 1] - x[i0 + 1], e1z = x[i1 + 2] - x[i0 + 2]
+      const e2x = x[i2] - x[i0], e2y = x[i2 + 1] - x[i0 + 1], e2z = x[i2 + 2] - x[i0 + 2]
+      const e3x = x[i3] - x[i0], e3y = x[i3 + 1] - x[i0 + 1], e3z = x[i3 + 2] - x[i0 + 2]
+      const v = ((e2y * e3z - e2z * e3y) * e1x + (e2z * e3x - e2x * e3z) * e1y + (e2x * e3y - e2y * e3x) * e1z) / 6
+      vol += v; rest += restVol[t]
+      if (v < 0) inverted++
+    }
+    return { volume: vol / rest, inverted }
+  }
+
+  /** Shape matching: the best-fit rigid placement of the rest lattice (Muller et al.), pulled toward weakly. */
+  shapeMatch(k) {
+    const { x, n, lattice: { rest }, shape: { A, S2, V, R } } = this
+    let cx = 0, cy = 0, cz = 0
+    for (let i = 0; i < n; i++) { cx += x[3 * i]; cy += x[3 * i + 1]; cz += x[3 * i + 2] }
+    cx /= n; cy /= n; cz /= n
+    A.fill(0)
+    for (let i = 0; i < n; i++) {
+      const px = x[3 * i] - cx, py = x[3 * i + 1] - cy, pz = x[3 * i + 2] - cz // rest is centred at the origin
+      const qx = rest[3 * i], qy = rest[3 * i + 1], qz = rest[3 * i + 2]
+      A[0] += px * qx; A[1] += px * qy; A[2] += px * qz
+      A[3] += py * qx; A[4] += py * qy; A[5] += py * qz
+      A[6] += pz * qx; A[7] += pz * qy; A[8] += pz * qz
+    }
+    // R = A (A^T A)^-1/2 by eigen decomposition of A^T A
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) { let t = 0; for (let k2 = 0; k2 < 3; k2++) t += A[3 * k2 + r] * A[3 * k2 + c]; S2[3 * r + c] = t }
+    eigen3(S2, V)
+    const inv = [0, 1, 2].map(a => { let lam = 0; for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) lam += V[3 * r + a] * S2[3 * r + c] * V[3 * c + a]; return lam > 1e-18 ? 1 / Math.sqrt(lam) : 0 })
+    // S^-1 = V diag(inv) V^T, R = A S^-1
+    for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) {
+      let t = 0
+      for (let a = 0; a < 3; a++) for (let b = 0; b < 3; b++) t += A[3 * r + a] * V[3 * a + b] * inv[b] * V[3 * c + b]
+      R[3 * r + c] = t
+    }
+    const det = R[0] * (R[4] * R[8] - R[5] * R[7]) - R[1] * (R[3] * R[8] - R[5] * R[6]) + R[2] * (R[3] * R[7] - R[4] * R[6])
+    if (!(det > 0.5)) return // degenerate (flat or reflected): leave it to the constraints
+    for (let i = 0; i < n; i++) {
+      const qx = rest[3 * i], qy = rest[3 * i + 1], qz = rest[3 * i + 2]
+      const gx = R[0] * qx + R[1] * qy + R[2] * qz + cx, gy = R[3] * qx + R[4] * qy + R[5] * qz + cy, gz = R[6] * qx + R[7] * qy + R[8] * qz + cz
+      x[3 * i] += (gx - x[3 * i]) * k; x[3 * i + 1] += (gy - x[3 * i + 1]) * k; x[3 * i + 2] += (gz - x[3 * i + 2]) * k
+    }
+    // Layer ordering along the lattice's own up axis: a column's layers never pass through each other, so a
+    // crushing finger cannot leave the lattice inverted (distance constraints alone are satisfied by the
+    // mirrored configuration too)
+    const ux = R[2], uy = R[5], uz = R[8]
+    const gap = LAYER_GAP * this.layerSpacing
+    const { columns, layers } = this
+    for (let c0 = 0; c0 < columns.length; c0 += layers) {
+      for (let l = 1; l < layers; l++) {
+        const a = 3 * columns[c0 + l - 1], b = 3 * columns[c0 + l]
+        const dz = (x[b] - x[a]) * ux + (x[b + 1] - x[a + 1]) * uy + (x[b + 2] - x[a + 2]) * uz
+        if (dz < gap) {
+          const h = (gap - dz) / 2
+          x[a] -= ux * h; x[a + 1] -= uy * h; x[a + 2] -= uz * h
+          x[b] += ux * h; x[b + 1] += uy * h; x[b + 2] += uz * h
+        }
+      }
+    }
   }
 
   /** Mean particle speed (m/s). */
@@ -229,9 +342,19 @@ function localDistance(c, p, out) {
       } else { out[0] = dz; out[1] = 0; out[2] = 0; out[3] = pz >= 0 ? 1 : -1 }
       return
     }
-    default: { // BOX, and MESH as its fitted box (c.half, centred at c.center in the geom frame)
-      const half = c.type === BOX ? c.size : c.half
-      const cx = c.type === BOX ? 0 : c.center[0], cy = c.type === BOX ? 0 : c.center[1], cz = c.type === BOX ? 0 : c.center[2]
+    case MESH: { // fitted polytope: max over its planes of (n . p - d)
+      const planes = c.planes
+      let best = -Infinity, bi = 0
+      for (let i = 0; i < NDOP; i++) {
+        const v = DOP_DIRS[3 * i] * px + DOP_DIRS[3 * i + 1] * py + DOP_DIRS[3 * i + 2] * pz - planes[i]
+        if (v > best) { best = v; bi = i }
+      }
+      out[0] = best; out[1] = DOP_DIRS[3 * bi]; out[2] = DOP_DIRS[3 * bi + 1]; out[3] = DOP_DIRS[3 * bi + 2]
+      return
+    }
+    default: { // BOX
+      const half = c.size
+      const cx = 0, cy = 0, cz = 0
       const qx = Math.abs(px - cx) - half[0], qy = Math.abs(py - cy) - half[1], qz = Math.abs(pz - cz) - half[2]
       const sx = px - cx >= 0 ? 1 : -1, sy = py - cy >= 0 ? 1 : -1, sz = pz - cz >= 0 ? 1 : -1
       if (qx > 0 || qy > 0 || qz > 0) {
@@ -307,7 +430,6 @@ export class SoftWorld {
   buildColliders() {
     const { m } = this
     const list = []
-    const cov = new Float64Array(9), axes = new Float64Array(9)
     const rollers = this.belts.map(() => [])
     for (let g = 0; g < m.ngeom; g++) {
       if (!m.geom_contype[g] && !m.geom_conaffinity[g]) continue
@@ -327,32 +449,27 @@ export class SoftWorld {
         const mesh = m.geom_dataid[g]
         const va = m.mesh_vertadr[mesh], vn = m.mesh_vertnum[mesh]
         const vert = m.mesh_vert.subarray(3 * va, 3 * (va + vn))
-        const mean = [0, 0, 0]
-        for (let i = 0; i < vn; i++) { mean[0] += vert[3 * i]; mean[1] += vert[3 * i + 1]; mean[2] += vert[3 * i + 2] }
-        mean[0] /= vn; mean[1] /= vn; mean[2] /= vn
-        cov.fill(0)
+        const planes = new Float64Array(NDOP).fill(-Infinity)
+        let rad2 = 0
         for (let i = 0; i < vn; i++) {
-          const d = [vert[3 * i] - mean[0], vert[3 * i + 1] - mean[1], vert[3 * i + 2] - mean[2]]
-          for (let r = 0; r < 3; r++) for (let s = 0; s < 3; s++) cov[3 * r + s] += d[r] * d[s]
+          const x = vert[3 * i], y = vert[3 * i + 1], z = vert[3 * i + 2]
+          rad2 = Math.max(rad2, x * x + y * y + z * z)
+          for (let k = 0; k < NDOP; k++) {
+            const d = DOP_DIRS[3 * k] * x + DOP_DIRS[3 * k + 1] * y + DOP_DIRS[3 * k + 2] * z
+            if (d > planes[k]) planes[k] = d
+          }
         }
-        eigen3(cov, axes)
-        // box in the eigenframe: centre = mid of projections, half = half range
-        const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity]
-        for (let i = 0; i < vn; i++) for (let a = 0; a < 3; a++) {
-          const p = vert[3 * i] * axes[a] + vert[3 * i + 1] * axes[3 + a] + vert[3 * i + 2] * axes[6 + a]
-          if (p < lo[a]) lo[a] = p
-          if (p > hi[a]) hi[a] = p
-        }
-        c.axes = Float64Array.from(axes) // columns = box axes in the geom frame
-        c.half = [0, 1, 2].map(a => (hi[a] - lo[a]) / 2)
-        c.center = [0, 1, 2].map(a => (hi[a] + lo[a]) / 2) // in the eigenframe
-        c.radius = Math.sqrt(c.center[0] ** 2 + c.center[1] ** 2 + c.center[2] ** 2) + Math.sqrt(c.half[0] ** 2 + c.half[1] ** 2 + c.half[2] ** 2)
+        c.planes = planes
+        c.radius = Math.sqrt(rad2)
       } else if (type === PLANE) c.radius = Infinity
       else if (type === BOX) c.radius = Math.sqrt(c.size[0] ** 2 + c.size[1] ** 2 + c.size[2] ** 2)
       else if (type === CYLINDER || type === CAPSULE) c.radius = Math.sqrt(c.size[0] ** 2 + c.size[1] ** 2) + (type === CAPSULE ? c.size[0] : 0)
       else c.radius = c.size[0]
       list.push(c)
     }
+    // static fixtures last: when a hand presses a bag into the plate, the plate's push is applied after the
+    // hand's, so no sample is driven through the plate (a 20 mm sheet) and ejected underneath
+    list.sort((a, b) => Number(a.dynamic === false) - Number(b.dynamic === false))
     for (const geoms of rollers) {
       if (!geoms.length) continue
       // the belt surface: a static box spanning the rollers (axis along world x), top at the rollers' top,
@@ -463,6 +580,7 @@ export class SoftWorld {
       }
     }
     if (DEBUG.on && DEBUG.track >= 0) { const q = 3 * DEBUG.track; DEBUG.log.push(`  after constraints x=${x[q].toFixed(6)},${x[q + 1].toFixed(6)},${x[q + 2].toFixed(6)} (prev ${xPrev[q].toFixed(6)},${xPrev[q + 1].toFixed(6)},${xPrev[q + 2].toFixed(6)})`) }
+    b.shapeMatch(SHAPE_MATCH)
     // collisions with MuJoCo geoms
     b.updateAabb()
     this.collide(b, d, dt)
@@ -474,13 +592,13 @@ export class SoftWorld {
 
   collide(b, d, dt) {
     const { m } = this
-    const { x, xPrev, n, params, samples } = b
+    const { x, xPrev, n, params, nSamples, sampleIdx, sampleW, sampleWsum } = b
     const aabb = b.aabb
     const r = PARTICLE_RADIUS
     const out = this.out, local = this.local, wn = this.worldN, vel = this.vel, pt = this.pt, prev = this.prev
     const mass = params.mass / n
     const gx = d.geom_xpos
-    const total = n + samples.length
+    const total = n + nSamples
     for (const c of this.colliders) {
       const g3 = 3 * c.geom
       let cx, cy, cz, gm, g9
@@ -497,6 +615,7 @@ export class SoftWorld {
       const near = b.near
       const cf = m.geom_friction[g3]
       const mu = c.priority > SOFT_PRIORITY ? cf : c.priority < SOFT_PRIORITY ? params.friction : Math.max(params.friction, cf)
+      const reach2 = c.radius === Infinity ? Infinity : (c.radius + r + NEAR) * (c.radius + r + NEAR)
       for (let i = 0; i < total; i++) {
         if (i === n && !anyNear) break // no particle near this collider: no triangle can touch it either
         // the sample point and where it was at the start of the substep: a particle, or a point on a surface
@@ -505,13 +624,17 @@ export class SoftWorld {
         if (i < n) {
           const p = 3 * i
           pt[0] = x[p]; pt[1] = x[p + 1]; pt[2] = x[p + 2]
+          // outside the collider's bounding sphere (plus the near margin): neither near nor touching
+          const ddx = pt[0] - cx, ddy = pt[1] - cy, ddz = pt[2] - cz
+          if (ddx * ddx + ddy * ddy + ddz * ddz > reach2) { near[i] = 0; continue }
           prev[0] = xPrev[p]; prev[1] = xPrev[p + 1]; prev[2] = xPrev[p + 2]
           sa = p; wa = 1; wsum = 1
         } else {
-          const smp = samples[i - n]
-          if (!near[smp[0]] && !near[smp[1]] && !near[smp[2]]) continue
-          sa = 3 * smp[0]; sb = 3 * smp[1]; sc = 3 * smp[2]; wa = smp[3]; wb = smp[4]; wc = smp[5]
-          wsum = wa * wa + wb * wb + wc * wc
+          const si = 3 * (i - n)
+          const ia = sampleIdx[si], ib = sampleIdx[si + 1], ic = sampleIdx[si + 2]
+          if (!near[ia] && !near[ib] && !near[ic]) continue
+          sa = 3 * ia; sb = 3 * ib; sc = 3 * ic; wa = sampleW[si]; wb = sampleW[si + 1]; wc = sampleW[si + 2]
+          wsum = sampleWsum[i - n]
           for (let k = 0; k < 3; k++) {
             pt[k] = wa * x[sa + k] + wb * x[sb + k] + wc * x[sc + k]
             prev[k] = wa * xPrev[sa + k] + wb * xPrev[sb + k] + wc * xPrev[sc + k]
@@ -519,27 +642,17 @@ export class SoftWorld {
         }
         // world -> geom frame (xmat is row-major, columns are the geom axes): local = R^T (p - c)
         const dx = pt[0] - cx, dy = pt[1] - cy, dz = pt[2] - cz
-        let lx = gm[g9] * dx + gm[g9 + 3] * dy + gm[g9 + 6] * dz
-        let ly = gm[g9 + 1] * dx + gm[g9 + 4] * dy + gm[g9 + 7] * dz
-        let lz = gm[g9 + 2] * dx + gm[g9 + 5] * dy + gm[g9 + 8] * dz
-        if (c.type === MESH) { // and into the fitted box's eigenframe
-          const a = c.axes
-          const ex = a[0] * lx + a[3] * ly + a[6] * lz, ey = a[1] * lx + a[4] * ly + a[7] * lz, ez = a[2] * lx + a[5] * ly + a[8] * lz
-          lx = ex; ly = ey; lz = ez
-        }
+        const lx = gm[g9] * dx + gm[g9 + 3] * dy + gm[g9 + 6] * dz
+        const ly = gm[g9 + 1] * dx + gm[g9 + 4] * dy + gm[g9 + 7] * dz
+        const lz = gm[g9 + 2] * dx + gm[g9 + 5] * dy + gm[g9 + 8] * dz
         local[0] = lx; local[1] = ly; local[2] = lz
         localDistance(c, local, out)
         if (i < n) { const isNear = out[0] < NEAR; near[i] = isNear ? 1 : 0; if (isNear) anyNear = true }
         const pen = r - out[0]
-        if (pen <= 0) continue
+        if (!(pen > 0)) continue // also skips NaN (finite() ends the episode; no NaN force must reach MuJoCo)
         if (pen > this.maxPen) this.maxPen = pen
         // normal back to the world frame
-        let nx = out[1], ny = out[2], nz = out[3]
-        if (c.type === MESH) {
-          const a = c.axes
-          const ex = a[0] * nx + a[1] * ny + a[2] * nz, ey = a[3] * nx + a[4] * ny + a[5] * nz, ez = a[6] * nx + a[7] * ny + a[8] * nz
-          nx = ex; ny = ey; nz = ez
-        }
+        const nx = out[1], ny = out[2], nz = out[3]
         wn[0] = gm[g9] * nx + gm[g9 + 1] * ny + gm[g9 + 2] * nz
         wn[1] = gm[g9 + 3] * nx + gm[g9 + 4] * ny + gm[g9 + 5] * nz
         wn[2] = gm[g9 + 6] * nx + gm[g9 + 7] * ny + gm[g9 + 8] * nz
@@ -592,7 +705,10 @@ export class SoftWorld {
         // triangle's share
         if (c.dynamic) {
           const ms = i < n ? mass : mass / wsum
-          const fn = -REACTION_SCALE * ms * lift / (dt * dt) / SUBSTEPS
+          // plus damping on the body's own approach speed toward the sample (the surface velocity along the
+          // normal, which points from the collider to the sample), never pulling
+          const approach = Math.max(0, sx * wn[0] + sy * wn[1] + sz * wn[2])
+          const fn = -(REACTION_SCALE * ms * lift / (dt * dt) + NORMAL_DAMPING * approach) / SUBSTEPS
           const scale = -ms / (dt * this.dtStep)
           const fx = (mx - wn[0] * lift) * scale + fn * wn[0], fy = (my - wn[1] * lift) * scale + fn * wn[1], fz = (mz - wn[2] * lift) * scale + fn * wn[2]
           const ix = d.xipos[3 * c.body], iy = d.xipos[3 * c.body + 1], iz = d.xipos[3 * c.body + 2]
@@ -620,17 +736,17 @@ export class SoftWorld {
       const ba = A.aabb, bb = B.aabb
       if (ba[3] + r < bb[0] || bb[3] + r < ba[0] || ba[4] + r < bb[1] || bb[4] + r < ba[1] || ba[5] + r < bb[2] || bb[5] + r < ba[2]) continue
       for (const [S, box] of [[A, bb], [B, ba]]) {
-        const { x, n, samples } = S
-        const total = n + samples.length
+        const { x, n, nSamples, sampleIdx, sampleW, sampleWsum } = S
+        const total = n + nSamples
         const hx = (box[3] - box[0]) / 2, hy = (box[4] - box[1]) / 2, hz = (box[5] - box[2]) / 2
         const cx = (box[3] + box[0]) / 2, cy = (box[4] + box[1]) / 2, cz = (box[5] + box[2]) / 2
         for (let i = 0; i < total; i++) {
           let sa, sb, sc, wa, wb, wc, wsum
           if (i < n) { sa = 3 * i; wa = 1; wsum = 1; pt[0] = x[sa]; pt[1] = x[sa + 1]; pt[2] = x[sa + 2] }
           else {
-            const smp = samples[i - n]
-            sa = 3 * smp[0]; sb = 3 * smp[1]; sc = 3 * smp[2]; wa = smp[3]; wb = smp[4]; wc = smp[5]
-            wsum = wa * wa + wb * wb + wc * wc
+            const si = 3 * (i - n)
+            sa = 3 * sampleIdx[si]; sb = 3 * sampleIdx[si + 1]; sc = 3 * sampleIdx[si + 2]; wa = sampleW[si]; wb = sampleW[si + 1]; wc = sampleW[si + 2]
+            wsum = sampleWsum[i - n]
             for (let k = 0; k < 3; k++) pt[k] = wa * x[sa + k] + wb * x[sb + k] + wc * x[sc + k]
           }
           const qx = Math.abs(pt[0] - cx) - hx, qy = Math.abs(pt[1] - cy) - hy, qz = Math.abs(pt[2] - cz) - hz
@@ -680,7 +796,8 @@ export class SoftWorld {
   }
 
   /** Header description for replay. */
+  /** Header description for replay and offline rendering (surface triangles included, so Python needs no lattice code). */
   header() {
-    return this.bodies.map(b => ({ name: b.name, particles: b.n, half: b.def.half, cells: b.def.cells, ...b.params }))
+    return this.bodies.map(b => ({ name: b.name, particles: b.n, half: b.def.half, cells: b.def.cells, ...b.params, surface: Array.from(b.lattice.surface), top_start: b.lattice.topStart }))
   }
 }

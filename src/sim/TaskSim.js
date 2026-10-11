@@ -22,13 +22,18 @@
 //   soft?: { bodies: { [name]: { half, cells, mass?, ... } }, belts?: [geom prefixes] } declares XPBD soft
 //   parcels (soft.js) the task places with placeSoft/teleportSoft and reads with softPos/softUp/softSpeed;
 //   randomizeSoft?(rng) -> per-body physics; their particle positions are recorded per frame and replayed.
+//   timesteps?: the physics timesteps the task supports (the soft coupling is tuned for 0.002); the worker
+//   falls back to the first one and the headless gate skips the task at others.
+//   For the headless gate: spawnPoses?() -> poses that must be valid, failureCase?(sim) -> a state that must
+//   end as the outcome it promises, contactCases?: scripted hand/object/parcel interactions that are recorded,
+//   checked and replayed.
 
 import { ArmIK, ARM_JOINTS, IK_PARAMS } from './ik.js'
 import { EpisodeRecorder, EPISODE_FORMAT } from './episode.js'
 import { writeHandInput } from './autopilot.js'
 import { applyPhysics, compiledPhysics } from './replay.js'
 import { SIDES, HAND_INPUT, INPUT_SIZE, INPUT_NAMES, RAW_SIZE, RAW_LAYOUT, handOfBodyName } from './inputLayout.js'
-import { SoftWorld } from './soft.js'
+import { SoftWorld, SOFT_SOLVER } from './soft.js'
 
 export { SIDES, HAND_INPUT, INPUT_SIZE, INPUT_NAMES, RAW_SIZE, RAW_LAYOUT }
 export const CONTROL_HZ = 50
@@ -116,6 +121,9 @@ export class TaskSim {
     this.warningNames = warningNames(mj)
     if (!TIMESTEPS.some(t => Math.abs(t - this.dt) < 1e-9)) {
       throw new Error(`timestep ${this.dt} must be one of ${TIMESTEPS.join(', ')} so control stays at ${CONTROL_HZ} Hz`)
+    }
+    if (task.timesteps && !task.timesteps.some(t => Math.abs(t - this.dt) < 1e-9)) {
+      throw new Error(`task ${task.name} supports timesteps ${task.timesteps.join(', ')}, not ${this.dt}`)
     }
     this.stepsPerControl = Math.round(1 / (CONTROL_HZ * this.dt))
     this.controlDt = this.stepsPerControl * this.dt
@@ -579,6 +587,7 @@ export class TaskSim {
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
         soft_bodies: this.soft ? this.soft.header() : undefined,
+        soft_solver: this.soft ? SOFT_SOLVER : undefined,
         soft_belts: this.soft ? (task.soft.belts ?? []) : undefined,
         soft_physics: this.soft ? this.softPhysics : undefined,
         initial_soft: this.initialSoft,

@@ -22,6 +22,7 @@ let lastTick = 0
 let lastPost = 0
 let lastInput = -Infinity
 let bodies = null             // reused between posts when the previous buffer has been returned
+let softBuf = null            // same for the soft parcel positions
 const perf = { windowStart: 0, simTime: 0, stepMs: 0, steps: 0, rtf: 1, msPerStep: 0 }
 
 self.onmessage = ({ data: msg }) => {
@@ -39,6 +40,7 @@ self.onmessage = ({ data: msg }) => {
       break
     case 'state-buffer':
       bodies = msg.bodies
+      softBuf = msg.soft ?? null
       break
     case 'meta': // extra header fields known only to the main thread (XR frame rate once a session exists)
       if (sim) sim.meta = { ...sim.meta, ...msg.meta }
@@ -48,6 +50,12 @@ self.onmessage = ({ data: msg }) => {
 
 async function init({ baseUrl, timestep, autopilot, session, task: taskName, appVersion, userAgent }) {
   const task = getTask(taskName)
+  // a task may support only some timesteps (the soft coupling is tuned for 2 ms): fall back and say so
+  let timestepNote = ''
+  if (task.timesteps && timestep && !task.timesteps.some(t => Math.abs(t - timestep) < 1e-9)) {
+    timestepNote = `?dt=${timestep} is not supported by this task, using ${task.timesteps[0]}`
+    timestep = task.timesteps[0]
+  }
   mj = await loadMujoco()
   const readFile = async path => {
     const res = await fetch(baseUrl + path)
@@ -76,6 +84,7 @@ async function init({ baseUrl, timestep, autopilot, session, task: taskName, app
       resetButton: COMMON.resetButton, materials: task.materials ?? {}, geometry: task.geometry ?? {},
     },
     timestep: sim.dt,
+    timestepNote,
     soft: sim.soft ? sim.soft.describe() : [],
   }, transfer)
   lastTick = perf.windowStart = performance.now()
@@ -129,7 +138,8 @@ function tick() {
     lastPost = now
     const out = sim.writeBodies(bodies ?? new Float32Array(7 * sim.m.nbody))
     bodies = null
-    const soft = sim.soft ? sim.soft.gather(new Float32Array(3 * sim.soft.total)) : null
+    const soft = sim.soft ? sim.soft.gather(softBuf ?? new Float32Array(3 * sim.soft.total)) : null
+    softBuf = null
     self.postMessage({
       type: 'state',
       bodies: out,

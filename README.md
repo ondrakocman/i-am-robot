@@ -18,8 +18,9 @@ Live: https://ondrakocman.github.io/i-am-robot/
 - Manual reset: hold a robot hand on the red sphere to your upper left. Robot fingers glow while they touch an
   object. If the robot hand can't follow yours (blocked, out of reach), your real hand fades in as a skeleton.
 - The panel behind the table shows the recording state, saved-episode count and whether physics keeps up
-  (`1.00× real time`). If it drops, try `?dt=0.004`. The display runs at 90 Hz; `?hz=72` or `?hz=120` asks for
-  another rate the headset offers.
+  (`1.00× real time`). If it drops, try `?dt=0.004` (the conveyor task runs at 2 ms only: its soft parcels are
+  tuned for that step, and the app says so if another is asked for). The display runs at 90 Hz; `?hz=72` or
+  `?hz=120` asks for another rate the headset offers.
 
 ## Tasks
 
@@ -43,8 +44,9 @@ holding a hand on the reset button (`aborted`), a headset recenter (`recentered`
 speed), all logged.
 
 Adding a task: one module in `src/sim/tasks/` (scene XML, object list, `reset`/`randomize`, `goal` or `update`,
-`solved` and `reachTargets` for the headless check, `materials`/`geometry` for the renderer) and a line in
-`tasks/index.js`; the check script picks it up automatically.
+`materials`/`geometry` for the renderer, and for the headless check `solved`, `reachTargets`, optionally
+`spawnPoses`, `failureCase`, `contactCases` and `timesteps`; see the contract at the top of
+`src/sim/TaskSim.js`) and a line in `tasks/index.js`; the check script picks it up automatically.
 
 ## Running it
 
@@ -69,8 +71,10 @@ Per episode, at 50 Hz: `action` (actuator targets; the first `robot_nu` are the 
 order: waist ×3, then per arm 7 arm joints followed by 7 hand joints; the two hands list their fingers in
 different orders, so slice by name), `qpos`/`qvel` (full simulation state including the objects), `input`
 (retargeted operator command), `raw` (head pose and all 25 WebXR joints per hand, zero when untracked),
-`touching`. Free-object angular velocities in `qvel` are in the object's body frame (MuJoCo convention); the
-Python loader returns read-only views. The header holds the task and its language instruction, layout, seed, outcome and per-task result,
+`touching`, and in the conveyor task `soft` (every soft parcel's particle positions; `soft_bodies` in the header
+gives each lattice's size, cells, surface triangles and per-episode mass, friction and softness, `soft_solver`
+the solver constants the episode depends on). Free-object angular velocities in `qvel` are in the object's body
+frame (MuJoCo convention); the Python loader returns read-only views. The header holds the task and its language instruction, layout, seed, outcome and per-task result,
 randomized `physics`, logged teleport `events`, initial and final state, `peak_arm_velocity`, MuJoCo warning
 counters and `flags` (`fast_motion` above 6 rad/s, `slow_physics` if the headset fell below 0.9× real time,
 `unstable`), the real-time factor during the episode, SHA-256 hashes of every model file, and the app commit
@@ -79,9 +83,10 @@ and MuJoCo version. Episodes are numbered per session; `session` + `episode` is 
 Replay: `initial_qpos` + `initial_ctrl` + `physics` + actions + events reproduce `qpos`/`qvel` exactly with the
 same `@mujoco/mujoco` build and the same model files (`header.assets` holds their hashes; `app_version` is the
 commit to check out; `src/sim/replay.js` is the reference). A renderer needs only the logged `qpos`: body poses
-follow from the scene MJCF, and the robot's visual meshes from `public/models/meshes/visual.json` (the MJCF
-itself carries only collision hulls, so MuJoCo's own viewer shows no robot shell), so camera images can be
-produced offline from any viewpoint with any renderer.
+follow from the scene MJCF, the robot's visual meshes from `public/models/meshes/visual.json` (the MJCF
+itself carries only collision hulls, so MuJoCo's own viewer shows no robot shell), and a soft parcel's surface
+from the `soft` positions and the triangles in `soft_bodies`, so camera images can be produced offline from any
+viewpoint with any renderer.
 
 What is collected: robot and object state, your head pose and hand skeleton at 50 Hz, wall-clock start/end
 times, the browser's user-agent string, the headset's display rate and a random session id. Nothing is

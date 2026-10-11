@@ -11,6 +11,8 @@
 //   6. every geom the renderer draws has a material (collision-only geoms belong in group 3; an unmaterialed
 //      box drawn in default grey over a visual mesh is the classic mistake)
 //   7. a task's failureCase() ends the episode with the outcome it promises (the scoring's failure paths run)
+//   A task's contactCases (scripted hands/objects meeting its soft parcels) are recorded in stage 1, checked,
+//   and replayed in stage 2. A task that pins its timesteps is skipped at others (reported, not failed).
 //   node scripts/sim-check.mjs [task=<name>|all] [dt=0.002] [n=3] [seeds=25] [out=episodes.iamr]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
@@ -50,16 +52,18 @@ function holdReadyPose(sim, side = 0) {
 
 const recorded = []
 for (const task of tasks) {
+  if (task.timesteps && !task.timesteps.some(t => Math.abs(t - timestep) < 1e-9)) {
+    console.log(`\ntask ${task.name}: supports timesteps ${task.timesteps.join(', ')} only, skipped at ${timestep}`)
+    continue
+  }
   const { model: m, assets } = await loadScene(mj, readFile, { scene: task.scene, timestep })
   const base = compiledPhysics(m) // before anything randomizes the model, like the headset's fresh load
   console.log(`\ntask ${task.name}  timestep ${timestep}  nq=${m.nq} nv=${m.nv} nu=${m.nu} nbody=${m.nbody}`)
 
   // 1. episodes (the recording sim is built on the fresh model, as on the headset)
   const episodes = []
-  const sim = new TaskSim(mj, m, task, {
-    seed: 7, autopilot: true, onEpisode: ({ header, frames }) => episodes.push({ header, frames: frames.slice() }),
-    meta: { session: 'sim-check', app_version: 'sim-check', mujoco: MUJOCO_VERSION, assets }, // same header fields as the headset
-  })
+  const meta = { session: 'sim-check', app_version: 'sim-check', mujoco: MUJOCO_VERSION, assets } // same header fields as the headset
+  const sim = new TaskSim(mj, m, task, { seed: 7, autopilot: true, onEpisode: ({ header, frames }) => episodes.push({ header, frames: frames.slice() }), meta })
   if (!task.autopilot) console.log('no scripted demonstration for this task: checking goal detection from the solved configuration')
   // every teleport a task performs mid-episode (spawns, solved placement) must land in a valid state; measured
   // on a scratch MjData so the recording's own data is stepped exactly as on the headset
@@ -92,7 +96,7 @@ for (const task of tasks) {
     const got = []
     const scripted = { ...task, autopilot: c.hands }
     // built on the model the main sim already randomized: scale from the fresh values, as replay will
-    const probe = new TaskSim(mj, m, scripted, { seed: 21, autopilot: true, compiled: base, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
+    const probe = new TaskSim(mj, m, scripted, { seed: 21, autopilot: true, compiled: base, meta, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
     probe.scheduleAtFrame(Math.round(SOLVE_AT_S / probe.controlDt), () => c.setup(probe))
     while (!got.length && probe.steps < (SOLVE_AT_S + c.duration) / probe.dt) probe.step()
     if (!got.length) probe.abort('aborted')

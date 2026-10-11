@@ -90,19 +90,23 @@ export function MujocoScene() {
     worker.onmessage = ({ data }) => {
       if (data.type === 'state') {
         // only the newest state is rendered; hand a skipped one's buffer straight back to the worker
-        if (latest.current) worker.postMessage({ type: 'state-buffer', bodies: latest.current.bodies }, [latest.current.bodies.buffer])
+        if (latest.current) {
+          const { bodies: b, soft: sb } = latest.current
+          worker.postMessage({ type: 'state-buffer', bodies: b, soft: sb }, sb ? [b.buffer, sb.buffer] : [b.buffer])
+        }
         latest.current = data
         lastState.current = { at: performance.now(), info: data.info }
       } else if (data.type === 'ready') {
         const built = buildWorld(data)
         setWorld(built)
-        setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step · loading robot meshes…`)
+        const stepText = `MuJoCo ${data.timestep * 1000} ms step${data.timestepNote ? ` (${data.timestepNote})` : ''}`
+        setStatusText(`Physics ready · ${stepText} · loading robot meshes…`)
         // The robot's visual meshes are not in the physics model (see scripts/build-g1-mjcf.py): load them
         // here. Until they are in, no operator input reaches the worker, so no episode can start with an
         // invisible robot.
         saves.current.loading = 'LOADING ROBOT MESHES…'
         attachRobotVisuals(built, data.scene, baseUrl)
-          .then(() => { saves.current.loading = null; setStatusText(`Physics ready · MuJoCo ${data.timestep * 1000} ms step`) })
+          .then(() => { saves.current.loading = null; setStatusText(`Physics ready · ${stepText}`) })
           .catch(err => {
             console.error('[meshes]', err)
             saves.current.error = 'ROBOT MESHES FAILED — reload the page'
