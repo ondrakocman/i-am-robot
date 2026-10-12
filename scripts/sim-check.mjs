@@ -13,7 +13,7 @@
 //   7. a task's failureCase() ends the episode with the outcome it promises (the scoring's failure paths run)
 //   A task's contactCases (scripted hands/objects meeting its soft parcels) are recorded in stage 1, checked,
 //   and replayed in stage 2. A task that pins its timesteps is skipped at others (reported, not failed).
-//   node scripts/sim-check.mjs [task=<name>|all] [dt=0.002] [n=3] [seeds=25] [out=episodes.iamr]
+//   node scripts/sim-check.mjs [task=<name>|all] [dt=0.002] [n=3] [seeds=25] [contactSeeds=4] [out=episodes.iamr]
 import loadMujoco from '@mujoco/mujoco'
 import fs from 'node:fs/promises'
 import { loadScene } from '../src/sim/loadScene.js'
@@ -33,6 +33,7 @@ const tasks = !args.task || args.task === 'all' ? Object.values(TASKS) : [getTas
 const timestep = Number(args.dt ?? 0.002)
 const runs = Number(args.n ?? 3)
 const seeds = Number(args.seeds ?? 25)
+const contactSeeds = Number(args.contactSeeds ?? 4) // each contact case runs this many seeds (its randomization draws differ)
 let failures = 0
 const fail = msg => { failures++; console.error('FAIL:', msg) }
 
@@ -93,23 +94,27 @@ for (const task of tasks) {
   // 1b. contact cases: scripted hands and objects meeting the task's soft parcels (replayed like the rest)
   const contactEpisodes = []
   for (const c of task.contactCases ?? []) {
-    const got = []
-    const scripted = { ...task, autopilot: c.hands }
-    // built on the model the main sim already randomized: scale from the fresh values, as replay will
-    const probe = new TaskSim(mj, m, scripted, { seed: 21, autopilot: true, compiled: base, meta, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
-    probe.scheduleAtFrame(Math.round(SOLVE_AT_S / probe.controlDt), () => c.setup(probe))
-    while (!got.length && probe.steps < (SOLVE_AT_S + c.duration) / probe.dt) probe.step()
-    if (!got.length) probe.abort('aborted')
-    const h = got[0]?.header
-    if (!h) fail(`contact case '${c.name}' produced no episode`)
-    else {
-      const verdict = c.check ? c.check(probe, h) : null
-      if (verdict) fail(`contact case '${c.name}': ${verdict}`)
-      else console.log(`contact case '${c.name}': ${h.frames} frames recorded (${h.outcome})${c.describe ? ', ' + c.describe(probe) : ''}`)
-      contactEpisodes.push(got[0])
+    for (let k = 0; k < contactSeeds; k++) {
+      const seed = 21 + 4 * k // the task's randomization (bag mass, friction, softness, box masses) differs per seed
+      const got = []
+      const scripted = { ...task, autopilot: c.hands }
+      const probe = new TaskSim(mj, m, scripted, { seed, autopilot: true, compiled: base, meta: { ...meta, session: `sim-check/${c.name}` }, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
+      probe.scheduleAtFrame(Math.round(SOLVE_AT_S / probe.controlDt), () => c.setup(probe))
+      while (!got.length && probe.steps < (SOLVE_AT_S + c.duration) / probe.dt) probe.step()
+      if (!got.length) probe.abort('aborted')
+      const h = got[0]?.header
+      if (!h) fail(`contact case '${c.name}' seed ${seed} produced no episode`)
+      else {
+        const verdict = c.check ? c.check(probe, h) : null
+        if (verdict) fail(`contact case '${c.name}' seed ${seed}: ${verdict}`)
+        else console.log(`contact case '${c.name}' seed ${seed}: ${h.frames} frames (${h.outcome})${c.describe ? ', ' + c.describe(probe) : ''}`)
+        if (h.flags.includes('soft_unstable')) fail(`contact case '${c.name}' seed ${seed} was flagged soft_unstable`)
+        contactEpisodes.push(got[0])
+      }
+      probe.dispose()
     }
-    probe.dispose()
   }
+
   if (warningCount(sim.d)) fail('MuJoCo raised warnings after the last episode')
   if (episodes.length < runs) fail(`only ${episodes.length}/${runs} episodes finished`)
   if (worstTeleport > MAX_PENETRATION) fail(`a teleport during the episodes landed ${(worstTeleport * 1000).toFixed(1)} mm inside something`)

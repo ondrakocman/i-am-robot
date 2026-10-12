@@ -2,7 +2,14 @@
 // must reproduce the logged qpos/qvel bit-for-bit with the same MuJoCo build. Used by TaskSim (physics
 // randomization), scripts/sim-check.mjs and scripts/replay.mjs; also the specification of how a downstream
 // renderer should step an episode.
-import { SoftWorld } from './soft.js'
+import { SoftWorld, SOFT_SOLVER } from './soft.js'
+
+/** Names the soft-solver constants an episode was recorded with that differ from this build's (replay will diverge). */
+export function softSolverDrift(header) {
+  if (!header.soft_solver) return []
+  const now = SOFT_SOLVER()
+  return Object.keys(now).filter(k => header.soft_solver[k] !== now[k]).map(k => `${k}: ${header.soft_solver[k]} -> ${now[k]}`)
+}
 
 /**
  * Snapshot of the compiled mass/inertia/friction, taken on a freshly loaded model. Randomized physics scales
@@ -53,7 +60,7 @@ export function* replayFrames(mj, m, header, frames) {
   d.qpos.set(header.initial_qpos)
   d.ctrl.set(header.initial_ctrl ?? [])
   // soft parcels: rebuilt from the header and stepped in lockstep, their logged positions compared too
-  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { ...b }])), { belts: header.soft_belts ?? [] }) : null
+  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { ...b }])), { belts: header.soft_belts ?? [], proxies: header.soft_proxies ?? {} }) : null
   if (soft) {
     soft.setPhysics(header.soft_physics ?? {})
     soft.scatter(Float64Array.from(header.initial_soft))

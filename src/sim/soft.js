@@ -18,20 +18,26 @@ const GRAVITY = -9.81
 const PARTICLE_RADIUS = 0.004   // contact offset: a bag's skin
 const SUBSTEPS = 2              // per MuJoCo step (1 ms at the 2 ms step the soft tasks pin)
 const ITERATIONS = 2            // constraint passes per substep
-const SHAPE_MATCH = 0.02        // per substep: pull toward the best-fit rigid placement of the rest lattice
 const LAYER_GAP = 0.5           // a particle column's layers keep at least this fraction of their rest spacing (no inverted lattice)
-const NORMAL_DAMPING = 1.0      // N s/m per contact sample on the body's approach speed (a box resting on a bag buzzes without it)
+const PROXY_MARGIN = 0.001      // m: the proxy box's faces sit this far outside the bag's surface samples
+const PROXY_TAU = 0.05          // s: low-pass on the proxy box's pose and size
+// Tunable coupling constants, mutable so headless sweeps can A/B them; recorded in every header via SOFT_SOLVER()
+export const TUNING = {
+  reactionScale: 0.5,   // see the note below (0.15 before the inelastic velocity pass; swept over seeds since)
+  normalDamping: 1.0,   // N s/m per contact sample on the relative normal approach speed (a box resting on a bag buzzes without it)
+  shapeMatch: 0.02,     // per substep: pull toward the best-fit rigid placement of the rest lattice
+  forceTau: 0,          // s: low-pass on the reaction force (0 = none)
+}
 const MAX_LIFT = 0.02           // a particle is pushed out of a collider by at most this per substep (tunnelling guard)
 const SOFT_PRIORITY = 2         // like the rigid objects: a higher-priority geom's friction wins (the chute), a tie takes the larger
 // Reaction on MuJoCo bodies: the normal part is a penalty on how far a contact pushed the sample this substep,
-// with stiffness REACTION_SCALE x (sample mass / substep^2): that is REACTION_SCALE times the impulse the
+// with stiffness TUNING.reactionScale x (sample mass / substep^2): that is REACTION_SCALE times the impulse the
 // sample actually received, so the transferred force is consistent across bag mass and timestep (at rest it
 // is REACTION_SCALE x the resting weight on the body). The full impulse is an explicit, stiff exchange that
 // bounces a 400 g box and launches it (measured, with and without low-pass filtering); 0.15 is stable for the
 // bodies in these scenes. The tangential (friction) part is the sample's impulse as a force over the step.
-export const REACTION_SCALE = 0.15
 /** Everything in this file a replay depends on, for the episode header. */
-export const SOFT_SOLVER = { substeps: SUBSTEPS, iterations: ITERATIONS, particleRadius: PARTICLE_RADIUS, maxLift: MAX_LIFT, reactionScale: REACTION_SCALE, shapeMatch: SHAPE_MATCH, layerGap: LAYER_GAP, normalDamping: NORMAL_DAMPING, surfaceSamples: 4 }
+export const SOFT_SOLVER = () => ({ substeps: SUBSTEPS, iterations: ITERATIONS, particleRadius: PARTICLE_RADIUS, maxLift: MAX_LIFT, reactionScale: TUNING.reactionScale, shapeMatch: TUNING.shapeMatch, forceTau: TUNING.forceTau, proxyMargin: PROXY_MARGIN, proxyTau: PROXY_TAU, layerGap: LAYER_GAP, normalDamping: TUNING.normalDamping, surfaceSamples: 4 })
 export const DEBUG = { on: false, contacts: 0, lift: 0, slip: 0, fric: 0, surf: [0, 0, 0], mu: 0, track: -1, log: [] }
 // Collision samples: the particles plus, on every surface triangle, its centroid and three edge midpoints.
 // Particles alone (radius 4 mm, spacing 25 mm) let a 17 mm finger pass between them and impale the bag.
@@ -164,6 +170,16 @@ export class SoftBody {
       k++
     }
     this.near = new Uint8Array(this.n) // per collider pass: particles within NEAR of it
+    // contact bookkeeping for the velocity pass: the normal push each particle received this substep (which
+    // must not become velocity: an inelastic contact), the last contact normal and the surface's speed along it
+    this.dop = new Float64Array(NDOP) // world-space 26-plane bound of the particles, for bag-bag contact
+    this.R = Float64Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1]) // last best-fit rotation of the rest lattice (shape matching)
+    this.moved = false
+    this.pressed = false // a moving body (hand, box) touched this bag during the last step
+    this.push = new Float64Array(3 * this.n)
+    this.contactN = new Float64Array(3 * this.n)
+    this.contactVn = new Float64Array(this.n)
+    this.inContact = new Uint8Array(this.n)
     this.shape = { A: new Float64Array(9), S2: new Float64Array(9), V: new Float64Array(9), R: new Float64Array(9) }
     // vertical particle columns (consecutive layers), for the ordering constraint
     const [nx, ny, nz] = def.cells
@@ -197,6 +213,25 @@ export class SoftBody {
     this.v.fill(0)
     this.active = active
     this.updateAabb()
+    // the placed orientation, for the proxy and the layer ordering until shape matching refits it
+    const [w, qx, qy, qz] = quat
+    this.R.set([1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - w * qz), 2 * (qx * qz + w * qy),
+      2 * (qx * qy + w * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - w * qx),
+      2 * (qx * qz - w * qy), 2 * (qy * qz + w * qx), 1 - 2 * (qx * qx + qy * qy)])
+    this.moved = true // the proxy jumps to the new pose instead of sliding there
+  }
+
+  /** Fits the 26-plane bound to the current particles (world frame). */
+  updateDop() {
+    const { x, n, dop } = this
+    dop.fill(-Infinity)
+    for (let i = 0; i < n; i++) {
+      const px = x[3 * i], py = x[3 * i + 1], pz = x[3 * i + 2]
+      for (let k = 0; k < NDOP; k++) {
+        const d = DOP_DIRS[3 * k] * px + DOP_DIRS[3 * k + 1] * py + DOP_DIRS[3 * k + 2] * pz
+        if (d > dop[k]) dop[k] = d
+      }
+    }
   }
 
   updateAabb() {
@@ -277,6 +312,7 @@ export class SoftBody {
     }
     const det = R[0] * (R[4] * R[8] - R[5] * R[7]) - R[1] * (R[3] * R[8] - R[5] * R[6]) + R[2] * (R[3] * R[7] - R[4] * R[6])
     if (!(det > 0.5)) return // degenerate (flat or reflected): leave it to the constraints
+    this.R.set(R)
     for (let i = 0; i < n; i++) {
       const qx = rest[3 * i], qy = rest[3 * i + 1], qz = rest[3 * i + 2]
       const gx = R[0] * qx + R[1] * qy + R[2] * qz + cx, gy = R[3] * qx + R[4] * qy + R[5] * qz + cy, gz = R[6] * qx + R[7] * qy + R[8] * qz + cz
@@ -405,17 +441,28 @@ export class SoftWorld {
    * A roller belt (cylinders named with a `belts` prefix) is collided as one flat moving surface: particles are
    * larger than the gaps between rollers and would wedge into them, where the two rollers' friction cancels.
    */
-  constructor(mj, m, defs, { handOfBody, belts = [] } = {}) {
+  constructor(mj, m, defs, { handOfBody, belts = [], proxies = {} } = {}) {
     this.mj = mj
     this.m = m
     this.belts = belts
+    // mocap proxy boxes (see the scene XML): { bodyName } per soft body, resolved to mocap and geom ids
+    this.proxyGeoms = new Set()
+    this.proxies = Object.fromEntries(Object.entries(proxies).map(([name, body]) => {
+      const b = mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY.value, body)
+      if (b < 0 || m.body_mocapid[b] < 0) throw new Error(`soft: ${body} is not a mocap body`)
+      const geom = mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM.value, body)
+      if (geom < 0) throw new Error(`soft: proxy ${body} needs a geom of the same name`)
+      this.proxyGeoms.add(geom)
+      return [name, { mocap: m.body_mocapid[b], geom }]
+    }))
     this.bodies = Object.entries(defs).map(([name, def]) => new SoftBody(name, def))
     this.byName = Object.fromEntries(this.bodies.map(b => [b.name, b]))
     this.total = this.bodies.reduce((s, b) => s + b.n, 0)
     this.handOfBody = handOfBody ?? new Int8Array(m.nbody).fill(-1)
     this.touching = new Uint8Array(2)
     this.colliders = this.buildColliders()
-    this.force = new Float64Array(6 * m.nbody)   // reaction this step, written to xfrc_applied
+    this.force = new Float64Array(6 * m.nbody)   // reaction this step, written to xfrc_applied (filtered if forceTau)
+    this.forceFilt = new Float64Array(6 * m.nbody)
     this.dtStep = m.opt.timestep
     this.vel = new Float64Array(6)
     this.pt = new Float64Array(3)
@@ -433,6 +480,7 @@ export class SoftWorld {
     const rollers = this.belts.map(() => [])
     for (let g = 0; g < m.ngeom; g++) {
       if (!m.geom_contype[g] && !m.geom_conaffinity[g]) continue
+      if (this.proxyGeoms.has(g)) continue // a bag's own proxy is not an obstacle to it
       const type = m.geom_type[g]
       const gname = this.mj.mj_id2name(m, this.mj.mjtObj.mjOBJ_GEOM.value, g) ?? ''
       const belt = this.belts.findIndex(prefix => gname.startsWith(prefix))
@@ -519,17 +567,76 @@ export class SoftWorld {
     this.touching.fill(0)
     this.maxPen = 0
     const active = this.bodies.filter(b => b.active)
+    for (const b of active) b.pressed = false
     if (active.length) {
       for (let s = 0; s < SUBSTEPS; s++) {
         for (const b of active) this.substep(b, d, dt)
-        if (active.length > 1) this.softContacts(active, dt)
+        if (active.length > 1) this.softContacts(active)
       }
     }
-    d.xfrc_applied.set(this.force)
+    this.updateProxies(d)
+    if (TUNING.forceTau > 0) {
+      const alpha = Math.min(1, this.dtStep / TUNING.forceTau)
+      for (let i = 0; i < this.force.length; i++) this.forceFilt[i] += (this.force[i] - this.forceFilt[i]) * alpha
+      d.xfrc_applied.set(this.forceFilt)
+    } else d.xfrc_applied.set(this.force)
+  }
+
+  // Each bag's proxy box: centred on the particles' extents along the bag's own axes (last shape-match
+  // rotation), half extents the particle extents plus the skin and a 1 mm margin (a box resting on the proxy
+  // then sits just above the surface samples, so it does not keep nudging the particles), pose and size
+  // low-passed over PROXY_TAU so particle jitter does not shake what rests on it; a parked bag takes its proxy
+  // along (far from the scene) at once
+  updateProxies(d) {
+    const { m } = this
+    const alpha = Math.min(1, this.dtStep / PROXY_TAU)
+    for (const b of this.bodies) {
+      const p = this.proxies[b.name]
+      if (!p) continue
+      const { x, n, R } = b
+      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity]
+      for (let i = 0; i < n; i++) {
+        const px = x[3 * i], py = x[3 * i + 1], pz = x[3 * i + 2]
+        for (let a = 0; a < 3; a++) { // projection on column a of R
+          const v = R[a] * px + R[3 + a] * py + R[6 + a] * pz
+          if (v < lo[a]) lo[a] = v
+          if (v > hi[a]) hi[a] = v
+        }
+      }
+      const mid = [0, 1, 2].map(a => (lo[a] + hi[a]) / 2)
+      const half = [0, 1, 2].map(a => (hi[a] - lo[a]) / 2 + PARTICLE_RADIUS + PROXY_MARGIN)
+      // centre back in the world frame: R * mid
+      const cx = R[0] * mid[0] + R[1] * mid[1] + R[2] * mid[2], cy = R[3] * mid[0] + R[4] * mid[1] + R[5] * mid[2], cz = R[6] * mid[0] + R[7] * mid[1] + R[8] * mid[2]
+      const k = b.moved ? 1 : alpha // a teleport (place) moves the proxy at once
+      b.moved = false
+      const mp = d.mocap_pos, o = 3 * p.mocap
+      mp[o] += (cx - mp[o]) * k; mp[o + 1] += (cy - mp[o + 1]) * k; mp[o + 2] += (cz - mp[o + 2]) * k
+      for (let a = 0; a < 3; a++) half[a] = m.geom_size[3 * p.geom + a] + (half[a] - m.geom_size[3 * p.geom + a]) * k
+      // quaternion (w, x, y, z) of R
+      const tr = R[0] + R[4] + R[8]
+      let qw, qx, qy, qz
+      if (tr > 0) { const s = Math.sqrt(tr + 1) * 2; qw = 0.25 * s; qx = (R[7] - R[5]) / s; qy = (R[2] - R[6]) / s; qz = (R[3] - R[1]) / s }
+      else if (R[0] > R[4] && R[0] > R[8]) { const s = Math.sqrt(1 + R[0] - R[4] - R[8]) * 2; qw = (R[7] - R[5]) / s; qx = 0.25 * s; qy = (R[1] + R[3]) / s; qz = (R[2] + R[6]) / s }
+      else if (R[4] > R[8]) { const s = Math.sqrt(1 + R[4] - R[0] - R[8]) * 2; qw = (R[2] - R[6]) / s; qx = (R[1] + R[3]) / s; qy = 0.25 * s; qz = (R[5] + R[7]) / s }
+      else { const s = Math.sqrt(1 + R[8] - R[0] - R[4]) * 2; qw = (R[3] - R[1]) / s; qx = (R[2] + R[6]) / s; qy = (R[5] + R[7]) / s; qz = 0.25 * s }
+      const mq = d.mocap_quat, q = 4 * p.mocap
+      if (mq[q] * qw + mq[q + 1] * qx + mq[q + 2] * qy + mq[q + 3] * qz < 0) { qw = -qw; qx = -qx; qy = -qy; qz = -qz } // same hemisphere
+      mq[q] += (qw - mq[q]) * k; mq[q + 1] += (qx - mq[q + 1]) * k; mq[q + 2] += (qy - mq[q + 2]) * k; mq[q + 3] += (qz - mq[q + 3]) * k
+      const qn = Math.sqrt(mq[q] * mq[q] + mq[q + 1] * mq[q + 1] + mq[q + 2] * mq[q + 2] + mq[q + 3] * mq[q + 3]) || 1
+      mq[q] /= qn; mq[q + 1] /= qn; mq[q + 2] /= qn; mq[q + 3] /= qn
+      m.geom_size[3 * p.geom] = half[0]; m.geom_size[3 * p.geom + 1] = half[1]; m.geom_size[3 * p.geom + 2] = half[2]
+      m.geom_rbound[p.geom] = Math.sqrt(half[0] * half[0] + half[1] * half[1] + half[2] * half[2])
+      // MuJoCo's broad phase uses the compile-time bounding box: keep it in step with the size
+      const ab = 6 * p.geom
+      m.geom_aabb[ab] = 0; m.geom_aabb[ab + 1] = 0; m.geom_aabb[ab + 2] = 0
+      m.geom_aabb[ab + 3] = half[0]; m.geom_aabb[ab + 4] = half[1]; m.geom_aabb[ab + 5] = half[2]
+    }
   }
 
   substep(b, d, dt) {
     const { x, xPrev, v, n, invMass, lattice, params } = b
+    b.push.fill(0)
+    b.inContact.fill(0)
     const g = GRAVITY * dt
     // predict
     for (let i = 0; i < n; i++) {
@@ -580,14 +687,26 @@ export class SoftWorld {
       }
     }
     if (DEBUG.on && DEBUG.track >= 0) { const q = 3 * DEBUG.track; DEBUG.log.push(`  after constraints x=${x[q].toFixed(6)},${x[q + 1].toFixed(6)},${x[q + 2].toFixed(6)} (prev ${xPrev[q].toFixed(6)},${xPrev[q + 1].toFixed(6)},${xPrev[q + 2].toFixed(6)})`) }
-    b.shapeMatch(SHAPE_MATCH)
+    b.shapeMatch(TUNING.shapeMatch)
     // collisions with MuJoCo geoms
     b.updateAabb()
     this.collide(b, d, dt)
     if (DEBUG.on && DEBUG.track >= 0) { const q = 3 * DEBUG.track; DEBUG.log.push(`  after collide     x=${x[q].toFixed(6)},${x[q + 1].toFixed(6)},${x[q + 2].toFixed(6)} v=${((x[q] - xPrev[q]) / dt).toFixed(4)},${((x[q + 1] - xPrev[q + 1]) / dt).toFixed(4)},${((x[q + 2] - xPrev[q + 2]) / dt).toFixed(4)}`) }
-    // velocities, damping
+    // Velocities (damped). The normal push a contact gave a particle is not velocity (a plain
+    // (x - xPrev) / dt turns a 20 mm push into 20 m/s and launches the bag); instead a touched particle may
+    // not move into its surface: its velocity along the contact normal is at least the surface's own.
     const damp = Math.max(0, 1 - params.damping * dt)
-    for (let i = 0; i < 3 * n; i++) v[i] = (x[i] - xPrev[i]) / dt * damp
+    const { push, contactN, contactVn, inContact } = b
+    for (let i = 0; i < n; i++) {
+      const p = 3 * i
+      v[p] = (x[p] - xPrev[p] - push[p]) / dt * damp
+      v[p + 1] = (x[p + 1] - xPrev[p + 1] - push[p + 1]) / dt * damp
+      v[p + 2] = (x[p + 2] - xPrev[p + 2] - push[p + 2]) / dt * damp
+      if (inContact[i]) {
+        const vn = v[p] * contactN[p] + v[p + 1] * contactN[p + 1] + v[p + 2] * contactN[p + 2] - contactVn[i]
+        if (vn < 0) { v[p] -= vn * contactN[p]; v[p + 1] -= vn * contactN[p + 1]; v[p + 2] -= vn * contactN[p + 2] }
+      }
+    }
   }
 
   collide(b, d, dt) {
@@ -680,6 +799,13 @@ export class SoftWorld {
         // correction of the sample point: out along the normal, then the tangential slip relative to the
         // surface removed up to the Coulomb limit
         let mx = wn[0] * lift, my = wn[1] * lift, mz = wn[2] * lift
+        const sn = sx * wn[0] + sy * wn[1] + sz * wn[2] // surface speed along the normal
+        {
+          const { push, contactN, contactVn, inContact } = b
+          const mark = (q, w) => { push[q] += mx * w; push[q + 1] += my * w; push[q + 2] += mz * w; const pi = q / 3; contactN[q] = wn[0]; contactN[q + 1] = wn[1]; contactN[q + 2] = wn[2]; contactVn[pi] = sn; inContact[pi] = 1 }
+          if (i < n) mark(sa, 1)
+          else { mark(sa, wa / wsum); mark(sb, wb / wsum); mark(sc, wc / wsum) }
+        }
         let tx = (pt[0] + mx - prev[0]) - sx * dt, ty = (pt[1] + my - prev[1]) - sy * dt, tz = (pt[2] + mz - prev[2]) - sz * dt
         const tn = tx * wn[0] + ty * wn[1] + tz * wn[2]
         tx -= tn * wn[0]; ty -= tn * wn[1]; tz -= tn * wn[2]
@@ -705,10 +831,11 @@ export class SoftWorld {
         // triangle's share
         if (c.dynamic) {
           const ms = i < n ? mass : mass / wsum
-          // plus damping on the body's own approach speed toward the sample (the surface velocity along the
-          // normal, which points from the collider to the sample), never pulling
-          const approach = Math.max(0, sx * wn[0] + sy * wn[1] + sz * wn[2])
-          const fn = -(REACTION_SCALE * ms * lift / (dt * dt) + NORMAL_DAMPING * approach) / SUBSTEPS
+          // plus damping on the relative approach speed (surface toward the sample, along the normal that
+          // points from the collider to the sample), never pulling
+          const velN = i < n ? (b.v[sa] * wn[0] + b.v[sa + 1] * wn[1] + b.v[sa + 2] * wn[2]) : ((wa * b.v[sa] + wb * b.v[sb] + wc * b.v[sc]) * wn[0] + (wa * b.v[sa + 1] + wb * b.v[sb + 1] + wc * b.v[sc + 1]) * wn[1] + (wa * b.v[sa + 2] + wb * b.v[sb + 2] + wc * b.v[sc + 2]) * wn[2])
+          const approach = Math.max(0, sn - velN)
+          const fn = -(TUNING.reactionScale * ms * lift / (dt * dt) + TUNING.normalDamping * approach) / SUBSTEPS
           const scale = -ms / (dt * this.dtStep)
           const fx = (mx - wn[0] * lift) * scale + fn * wn[0], fy = (my - wn[1] * lift) * scale + fn * wn[1], fz = (mz - wn[2] * lift) * scale + fn * wn[2]
           const ix = d.xipos[3 * c.body], iy = d.xipos[3 * c.body + 1], iz = d.xipos[3 * c.body + 2]
@@ -721,25 +848,30 @@ export class SoftWorld {
       if (touched) {
         const hand = this.handOfBody[c.body]
         if (hand >= 0) this.touching[hand] = 1
+        if (c.dynamic) b.pressed = true
       }
     }
   }
 
-  // Bag-bag contact: every sample of one bag is kept out of the other bag's bounding box (both ways, half the
-  // depth each). Coarse (a bag is treated as its box by the other), but two bags stack and push instead of
-  // merging.
-  softContacts(active, dt) {
+  // Bag-bag contact: every sample of one bag is kept out of the other bag's 26-plane bound (both ways, half
+  // the depth each), inelastically: the vertices moved lose their approach velocity toward the other bag.
+  // Coarse (a bag is convex to the other), but two bags stack and push instead of merging or buzzing.
+  softContacts(active) {
     const r = PARTICLE_RADIUS
     const pt = this.pt
     for (let a = 0; a < active.length; a++) for (let b = a + 1; b < active.length; b++) {
       const A = active[a], B = active[b]
       const ba = A.aabb, bb = B.aabb
       if (ba[3] + r < bb[0] || bb[3] + r < ba[0] || ba[4] + r < bb[1] || bb[4] + r < ba[1] || ba[5] + r < bb[2] || bb[5] + r < ba[2]) continue
-      for (const [S, box] of [[A, bb], [B, ba]]) {
-        const { x, n, nSamples, sampleIdx, sampleW, sampleWsum } = S
+      A.updateDop(); B.updateDop()
+      const meanV = S => { let vx = 0, vy = 0, vz = 0; for (let i = 0; i < S.n; i++) { vx += S.v[3 * i]; vy += S.v[3 * i + 1]; vz += S.v[3 * i + 2] } return [vx / S.n, vy / S.n, vz / S.n] }
+      const vA = meanV(A), vB = meanV(B)
+      const mu = Math.max(A.params.friction, B.params.friction)
+      const dt = this.dtStep / SUBSTEPS
+      for (const [S, other, vOther] of [[A, B, vB], [B, A, vA]]) {
+        const { x, xPrev, v, n, nSamples, sampleIdx, sampleW, sampleWsum } = S
+        const planes = other.dop
         const total = n + nSamples
-        const hx = (box[3] - box[0]) / 2, hy = (box[4] - box[1]) / 2, hz = (box[5] - box[2]) / 2
-        const cx = (box[3] + box[0]) / 2, cy = (box[4] + box[1]) / 2, cz = (box[5] + box[2]) / 2
         for (let i = 0; i < total; i++) {
           let sa, sb, sc, wa, wb, wc, wsum
           if (i < n) { sa = 3 * i; wa = 1; wsum = 1; pt[0] = x[sa]; pt[1] = x[sa + 1]; pt[2] = x[sa + 2] }
@@ -749,27 +881,35 @@ export class SoftWorld {
             wsum = sampleWsum[i - n]
             for (let k = 0; k < 3; k++) pt[k] = wa * x[sa + k] + wb * x[sb + k] + wc * x[sc + k]
           }
-          const qx = Math.abs(pt[0] - cx) - hx, qy = Math.abs(pt[1] - cy) - hy, qz = Math.abs(pt[2] - cz) - hz
-          if (qx > r || qy > r || qz > r) continue
-          // inside (or within r of) the box: out through the nearest face, half the depth
-          let mx = 0, my = 0, mz = 0
-          if (qx >= qy && qx >= qz) mx = (pt[0] >= cx ? 1 : -1) * (r - qx) / 2
-          else if (qy >= qz) my = (pt[1] >= cy ? 1 : -1) * (r - qy) / 2
-          else mz = (pt[2] >= cz ? 1 : -1) * (r - qz) / 2
-          if (i < n) { x[sa] += mx; x[sa + 1] += my; x[sa + 2] += mz }
-          else {
-            const ka = wa / wsum, kb = wb / wsum, kc = wc / wsum
-            x[sa] += mx * ka; x[sa + 1] += my * ka; x[sa + 2] += mz * ka
-            x[sb] += mx * kb; x[sb + 1] += my * kb; x[sb + 2] += mz * kb
-            x[sc] += mx * kc; x[sc + 1] += my * kc; x[sc + 2] += mz * kc
+          let best = -Infinity, bi = 0
+          for (let k = 0; k < NDOP; k++) {
+            const d = DOP_DIRS[3 * k] * pt[0] + DOP_DIRS[3 * k + 1] * pt[1] + DOP_DIRS[3 * k + 2] * pt[2] - planes[k]
+            if (d > best) { best = d; bi = k }
           }
+          if (!(best < r)) continue
+          const nx = DOP_DIRS[3 * bi], ny = DOP_DIRS[3 * bi + 1], nz = DOP_DIRS[3 * bi + 2]
+          const h = (r - best) / 2
+          const fix = (q, w) => {
+            x[q] += nx * h * w; x[q + 1] += ny * h * w; x[q + 2] += nz * h * w
+            // inelastic: no velocity toward the other bag along the push direction
+            const rel = (v[q] - vOther[0]) * nx + (v[q + 1] - vOther[1]) * ny + (v[q + 2] - vOther[2]) * nz
+            if (rel < 0) { v[q] -= rel * nx; v[q + 1] -= rel * ny; v[q + 2] -= rel * nz }
+            // Coulomb friction: this substep's slip relative to the other bag, removed up to mu x push
+            let tx = (x[q] - xPrev[q]) - vOther[0] * dt, ty = (x[q + 1] - xPrev[q + 1]) - vOther[1] * dt, tz = (x[q + 2] - xPrev[q + 2]) - vOther[2] * dt
+            const tn = tx * nx + ty * ny + tz * nz
+            tx -= tn * nx; ty -= tn * ny; tz -= tn * nz
+            const slip = Math.sqrt(tx * tx + ty * ty + tz * tz)
+            if (slip > 1e-12) {
+              const k = Math.min(1, mu * h * w / slip)
+              x[q] -= tx * k; x[q + 1] -= ty * k; x[q + 2] -= tz * k
+              v[q] -= tx * k / dt; v[q + 1] -= ty * k / dt; v[q + 2] -= tz * k / dt
+            }
+          }
+          if (i < n) fix(sa, 1)
+          else { fix(sa, wa / wsum); fix(sb, wb / wsum); fix(sc, wc / wsum) }
         }
       }
-      for (const S of [A, B]) {
-        const damp = Math.max(0, 1 - S.params.damping * dt)
-        for (let i = 0; i < 3 * S.n; i++) S.v[i] = (S.x[i] - S.xPrev[i]) / dt * damp
-        S.updateAabb()
-      }
+      A.updateAabb(); B.updateAabb()
     }
   }
 
@@ -796,8 +936,20 @@ export class SoftWorld {
   }
 
   /** Header description for replay. */
-  /** Header description for replay and offline rendering (surface triangles included, so Python needs no lattice code). */
+  /** Header description for replay and offline rendering: lattice, per-episode params, surface triangles, top-face UVs and label (no JS needed to draw a bag). */
   header() {
-    return this.bodies.map(b => ({ name: b.name, particles: b.n, half: b.def.half, cells: b.def.cells, ...b.params, surface: Array.from(b.lattice.surface), top_start: b.lattice.topStart }))
+    return this.bodies.map(b => ({ name: b.name, particles: b.n, half: b.def.half, cells: b.def.cells, ...b.params, surface: Array.from(b.lattice.surface), top_start: b.lattice.topStart, uv: Array.from(b.lattice.uv), label: b.def.label ?? null }))
+  }
+
+  /** Fraction of body a's particles inside body b's 26-plane bound (both must be up to date via updateDop). */
+  overlap(a, b) {
+    let inside = 0
+    for (let i = 0; i < a.n; i++) {
+      const px = a.x[3 * i], py = a.x[3 * i + 1], pz = a.x[3 * i + 2]
+      let best = -Infinity
+      for (let k = 0; k < NDOP; k++) { const d = DOP_DIRS[3 * k] * px + DOP_DIRS[3 * k + 1] * py + DOP_DIRS[3 * k + 2] * pz - b.dop[k]; if (d > best) best = d }
+      if (best < 0) inside++
+    }
+    return inside / a.n
   }
 }

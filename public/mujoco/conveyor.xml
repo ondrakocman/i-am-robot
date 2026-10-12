@@ -7,7 +7,7 @@
 <mujoco model="g1_conveyor">
   <include file="g1_upper.xml"/>
 
-  <!-- timestep is overridden at load time by the app (?dt=...) -->
+  <!-- the app loads this scene at 2 ms only (the soft parcels are tuned for that step; ?dt= is ignored here) -->
   <option timestep="0.002" integrator="implicitfast" cone="elliptic" impratio="10"/>
 
   <default>
@@ -43,21 +43,21 @@
 
     <!-- gravity chute: low-friction sheet; priority 3 so its friction, not the parcel's, applies -->
     <body name="chute" pos="0.32 0 0">
-      <geom name="chute_slide" type="box" size="0.15 0.3195 0.0075" pos="0 0.6826 0.893" quat="0.984601 0.174819 0 0" solref="0.01 1" priority="3" friction="0.25 0.005 0.0001" material="chute"/>
-      <geom name="chute_rail0" type="box" size="0.008 0.3195 0.025" pos="-0.158 0.674 0.9164" quat="0.984601 0.174819 0 0" solref="0.01 1" priority="3" friction="0.25" material="rail"/>
-      <geom name="chute_rail1" type="box" size="0.008 0.3195 0.025" pos="0.158 0.674 0.9164" quat="0.984601 0.174819 0 0" solref="0.01 1" priority="3" friction="0.25" material="rail"/>
-      <geom type="box" size="0.012 0.02 0.4975" pos="-0.13 0.95 0.4975" material="leg"/>
-      <geom type="box" size="0.012 0.02 0.4975" pos="0.13 0.95 0.4975" material="leg"/>
+      <geom name="chute_slide" type="box" size="0.15 0.3195 0.0075" pos="0 0.5626 0.893" quat="0.984601 0.174819 0 0" solref="0.01 1" priority="3" friction="0.25 0.005 0.0001" material="chute"/>
+      <geom name="chute_rail0" type="box" size="0.008 0.3195 0.025" pos="-0.158 0.554 0.9164" quat="0.984601 0.174819 0 0" solref="0.01 1" priority="3" friction="0.25" material="rail"/>
+      <geom name="chute_rail1" type="box" size="0.008 0.3195 0.025" pos="0.158 0.554 0.9164" quat="0.984601 0.174819 0 0" solref="0.01 1" priority="3" friction="0.25" material="rail"/>
+      <geom type="box" size="0.012 0.02 0.4975" pos="-0.13 0.83 0.4975" material="leg"/>
+      <geom type="box" size="0.012 0.02 0.4975" pos="0.13 0.83 0.4975" material="leg"/>
     </body>
 
     <!-- flat work plate: sheet metal on a frame -->
-    <body name="plate" pos="0.35 0.13 0">
-      <geom name="plate_top" type="box" size="0.2 0.25 0.01" pos="0 0 0.78" class="touchable" material="plate"/>
-      <geom name="plate_lip" type="box" size="0.006 0.25 0.015" pos="0.194 0 0.805" class="touchable" material="rail"/>
-      <geom type="box" size="0.02 0.02 0.385" pos="-0.17 -0.22 0.385" material="leg"/>
-      <geom type="box" size="0.02 0.02 0.385" pos="-0.17 0.22 0.385" material="leg"/>
-      <geom type="box" size="0.02 0.02 0.385" pos="0.17 -0.22 0.385" material="leg"/>
-      <geom type="box" size="0.02 0.02 0.385" pos="0.17 0.22 0.385" material="leg"/>
+    <body name="plate" pos="0.35 0.07 0">
+      <geom name="plate_top" type="box" size="0.2 0.19 0.01" pos="0 0 0.78" class="touchable" material="plate"/>
+      <geom name="plate_lip" type="box" size="0.006 0.19 0.015" pos="0.194 0 0.805" class="touchable" material="rail"/>
+      <geom type="box" size="0.02 0.02 0.385" pos="-0.17 -0.16 0.385" material="leg"/>
+      <geom type="box" size="0.02 0.02 0.385" pos="-0.17 0.16 0.385" material="leg"/>
+      <geom type="box" size="0.02 0.02 0.385" pos="0.17 -0.16 0.385" material="leg"/>
+      <geom type="box" size="0.02 0.02 0.385" pos="0.17 0.16 0.385" material="leg"/>
     </body>
 
     <!-- belt_out: 25 driven rollers, surface at z=0.79, running toward the robot's right (-y) -->
@@ -172,33 +172,43 @@
 
     <body name="package0" pos="-3.0 0 0.031">
       <freejoint name="package0_free"/>
-      <geom name="package0" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package0" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label0" class="label" size="0.05 0.034 0.0002" pos="0 0 0.0302" material="label"/>
     </body>
     <body name="package1" pos="-3.3 0 0.031">
       <freejoint name="package1_free"/>
-      <geom name="package1" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package1" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label1" class="label" size="0.05 0.034 0.0002" pos="0 0 0.0302" material="label"/>
     </body>
     <body name="package2" pos="-3.6 0 0.026">
       <freejoint name="package2_free"/>
-      <geom name="package2" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package2" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label2" class="label" size="0.05 0.035 0.0002" pos="0 0 0.0252" material="label"/>
     </body>
     <body name="package3" pos="-3.9 0 0.026">
       <freejoint name="package3_free"/>
-      <geom name="package3" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package3" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label3" class="label" size="0.05 0.035 0.0002" pos="0 0 0.0252" material="label"/>
     </body>
     <body name="package4" pos="-4.2 0 0.041">
       <freejoint name="package4_free"/>
-      <geom name="package4" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package4" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label4" class="label" size="0.034 0.034 0.0002" pos="0 0 0.0402" material="label"/>
     </body>
     <body name="package5" pos="-4.5 0 0.041">
       <freejoint name="package5_free"/>
-      <geom name="package5" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package5" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label5" class="label" size="0.034 0.034 0.0002" pos="0 0 0.0402" material="label"/>
+    </body>
+
+    <!-- Soft-parcel proxies: one mocap box per bag, placed and sized by the soft solver every step to the
+         bag's current fitted box. It collides with the rigid packages only (contype bit 4), so a box resting on
+         a bag rests on MuJoCo's own contact instead of an explicit penalty; hands and fixtures never see it. -->
+    <body name="soft_proxy0" mocap="true" pos="-5 0 0.05">
+      <geom name="soft_proxy0" type="box" size="0.08 0.06 0.022" contype="0" conaffinity="4" group="3" solref="0.01 1" priority="1" friction="0.6 0.005 0.0001"/>
+    </body>
+    <body name="soft_proxy1" mocap="true" pos="-5.3 0 0.05">
+      <geom name="soft_proxy1" type="box" size="0.07 0.05 0.025" contype="0" conaffinity="4" group="3" solref="0.01 1" priority="1" friction="0.6 0.005 0.0001"/>
     </body>
   </worldbody>
 

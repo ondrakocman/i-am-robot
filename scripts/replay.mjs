@@ -4,8 +4,8 @@
 // The dump is newline-delimited JSON: one {"episode": header} line (header.body_names gives the body order),
 // then one {"t", "xpos", "xquat"} line per frame (world frame, quaternions w,x,y,z), written with back-pressure
 // so memory stays flat.
-// Soft parcels add a "soft" array of particle positions to each frame line (header.soft_bodies gives the
-// lattices; softLattice in src/sim/soft.js gives their surface triangles). A renderer needs only the logged
+// Soft parcels add a "soft" array of particle positions to each frame line (header.soft_bodies gives each
+// lattice with its surface triangles, top-face UVs and label). A renderer needs only the logged
 // qpos (and soft); this script is the reference for how the actions + events reproduce them, and a check that
 // the headset's build matches this one.
 import loadMujoco from '@mujoco/mujoco'
@@ -14,7 +14,7 @@ import { once } from 'node:events'
 import { loadScene } from '../src/sim/loadScene.js'
 import { TIMESTEPS } from '../src/sim/TaskSim.js'
 import { TASKS, hasTask } from '../src/sim/tasks/index.js'
-import { applyPhysics, compiledPhysics, replayFrames } from '../src/sim/replay.js'
+import { applyPhysics, compiledPhysics, replayFrames, softSolverDrift } from '../src/sim/replay.js'
 import { MUJOCO_VERSION as INSTALLED_MUJOCO, readPublic as readFile, readEpisodeFile } from './lib.mjs'
 
 const [file, out] = process.argv.slice(2)
@@ -34,6 +34,8 @@ for await (const { header, frames } of readEpisodeFile(file)) {
     failures++; console.error(`${tag}: unknown scene/timestep ${header.scene} @ ${header.timestep}`); continue
   }
   if (header.mujoco !== INSTALLED_MUJOCO) console.warn(`${tag}: recorded with MuJoCo ${header.mujoco}, installed ${INSTALLED_MUJOCO}; replay may differ`)
+  const drift = softSolverDrift(header)
+  if (drift.length) console.warn(`${tag}: soft solver constants changed since recording (${drift.join(', ')}); replay will differ`)
   const key = `${header.scene}|${header.timestep}`
   if (!models.has(key)) {
     const loaded = await loadScene(mj, readFile, { scene: header.scene, timestep: header.timestep })

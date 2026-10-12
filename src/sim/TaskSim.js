@@ -56,6 +56,8 @@ export const COMMON = {
   resetHold: 0.6,
   // Episodes whose arm joints exceed this are flagged 'fast_motion' (normal teleop stays < 3 rad/s)
   fastMotion: 6,                // rad/s
+  softSpeedLimit: 3,            // m/s mean particle speed: a soft parcel moving faster than that was thrown by the solver
+  softInvertedTimeout: 1,       // s a soft parcel may stay (partly) inverted, with nothing pressing it, before the episode is flagged
 }
 
 // Start posture: hands raised near the chest, clear of the objects (grip ~(0.22, +-0.13, 1.03))
@@ -212,7 +214,7 @@ export class TaskSim {
     this.raw = new Float32Array(RAW_SIZE)
     this.autoInput = new Float32Array(INPUT_SIZE)
     // Soft parcels (XPBD, soft.js), stepped in lockstep with MuJoCo and recorded per frame
-    this.soft = task.soft ? new SoftWorld(mj, m, task.soft.bodies, { handOfBody: this.handOfBody, belts: task.soft.belts ?? [] }) : null
+    this.soft = task.soft ? new SoftWorld(mj, m, task.soft.bodies, { handOfBody: this.handOfBody, belts: task.soft.belts ?? [], proxies: task.soft.proxies ?? {} }) : null
     this.softBuf = new Float64Array(this.soft ? 3 * this.soft.total : 0)
     this.recorder = new EpisodeRecorder([
       { name: 'time', size: 1 },
@@ -299,6 +301,8 @@ export class TaskSim {
     this.rtf = { min: Infinity, sum: 0, n: 0 }
     this.warnings.fill(0)
     this.untrackedFor = 0
+    this.softUnstable = false
+    this.invertedFor = 0
     this.status = 'waiting' // until the operator's hands show up
     this.steps = 0
     this.startTime = 0
@@ -461,6 +465,7 @@ export class TaskSim {
     if (this.status === 'running') {
       // A MuJoCo warning during the last steps means the state is reset/corrupt: end before recording it
       if (this.readWarnings() || (this.soft && !this.soft.finite())) { this.endEpisode('unstable'); return }
+      if (this.soft) this.monitorSoft()
       for (const dof of this.armDof) this.peakArmVel = Math.max(this.peakArmVel, Math.abs(d.qvel[dof]))
       const frame = [this.frameIndex * this.controlDt, d.ctrl, d.qpos, d.qvel, input, this.raw, this.touching]
       if (this.soft) frame.push(this.soft.gather(this.softBuf))
@@ -486,6 +491,20 @@ export class TaskSim {
       ? v * Math.min(Math.abs(lo), Math.abs(hi))
       : v * (Math.abs(lo) > Math.abs(hi) ? lo : hi)
     return Math.max(lo, Math.min(hi, target))
+  }
+
+  // A soft parcel moving faster than any hand can push it, or staying inverted for a while when nothing is
+  // pressing it (a hand crushing a bag inverts cells legitimately), is a contact the solver did not handle
+  // well: the episode is kept but flagged soft_unstable
+  monitorSoft() {
+    let inverted = 0
+    for (const b of this.soft.bodies) {
+      if (!b.active) continue
+      if (b.speed() > COMMON.softSpeedLimit) this.softUnstable = true
+      if (!b.pressed) inverted += b.volumeState().inverted
+    }
+    this.invertedFor = inverted > 0 ? this.invertedFor + this.controlDt : 0
+    if (this.invertedFor > COMMON.softInvertedTimeout) this.softUnstable = true
   }
 
   /** Which hand touches any task object, from the current contact list. */
@@ -559,6 +578,7 @@ export class TaskSim {
     if (this.peakArmVel > COMMON.fastMotion) flags.push('fast_motion')
     if (outcome === 'unstable') flags.push('unstable')
     if (this.rtf.n && this.rtf.min < 0.9) flags.push('slow_physics')
+    if (this.softUnstable) flags.push('soft_unstable')
     this.onEpisode({
       header: {
         format: EPISODE_FORMAT,
@@ -587,8 +607,9 @@ export class TaskSim {
         initial_qpos: this.initialQpos,
         initial_ctrl: this.initialCtrl,
         soft_bodies: this.soft ? this.soft.header() : undefined,
-        soft_solver: this.soft ? SOFT_SOLVER : undefined,
+        soft_solver: this.soft ? SOFT_SOLVER() : undefined,
         soft_belts: this.soft ? (task.soft.belts ?? []) : undefined,
+        soft_proxies: this.soft ? (task.soft.proxies ?? {}) : undefined,
         soft_physics: this.soft ? this.softPhysics : undefined,
         initial_soft: this.initialSoft,
         initial_soft_active: this.initialSoftActive,

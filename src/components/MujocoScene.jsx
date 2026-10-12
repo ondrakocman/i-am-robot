@@ -223,7 +223,7 @@ export function MujocoScene() {
       saves.current.stalled = false
       applyBodies(world, s.bodies)
       if (s.soft) applySoft(world, s.soft)
-      workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies }, [s.bodies.buffer])
+      workerRef.current?.postMessage({ type: 'state-buffer', bodies: s.bodies, soft: s.soft }, s.soft ? [s.bodies.buffer, s.soft.buffer] : [s.bodies.buffer])
       applyInfo(world, s.info, saves.current)
     } else if (lastState.current.info && performance.now() - lastState.current.at > STALL_MS) {
       // the worker stopped posting (crashed tick, throttled tab): say so on the in-VR panel, not just the DOM
