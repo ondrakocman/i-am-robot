@@ -60,7 +60,7 @@ export function* replayFrames(mj, m, header, frames) {
   d.qpos.set(header.initial_qpos)
   d.ctrl.set(header.initial_ctrl ?? [])
   // soft parcels: rebuilt from the header and stepped in lockstep, their logged positions compared too
-  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { ...b }])), { belts: header.soft_belts ?? [], proxies: header.soft_proxies ?? {} }) : null
+  const soft = header.soft_bodies?.length ? new SoftWorld(mj, m, Object.fromEntries(header.soft_bodies.map(b => [b.name, { ...b }])), { belts: header.soft_belts ?? [] }) : null
   if (soft) {
     soft.setPhysics(header.soft_physics ?? {})
     soft.scatter(Float64Array.from(header.initial_soft))
@@ -87,7 +87,7 @@ export function* replayFrames(mj, m, header, frames) {
       // Logged teleports (spawns) come after the frame they are tagged with, before the steps to the next one
       for (; ev < header.events.length && header.events[ev].tick === i; ev++) {
         const e = header.events[ev]
-        if (e.soft) { soft.byName[e.soft].place(e.pos, e.quat, e.active); continue }
+        if (e.soft) { soft.place(e.soft, e.pos, e.quat, e.active, d); continue }
         d.qpos.set(e.qpos, e.qpos_adr)
         d.qvel.fill(0, e.qvel_adr, e.qvel_adr + 6)
       }

@@ -23,6 +23,7 @@ const SESSION_ID = crypto.randomUUID?.() ?? String(Date.now())
 const MAT_BODY = new THREE.MeshStandardMaterial({ color: 0x9c9fa3, roughness: 0.42, metalness: 0.7, flatShading: true })
 const MAT_ACCENT = new THREE.MeshStandardMaterial({ color: 0x2a2b2e, roughness: 0.6, metalness: 0.3, flatShading: true })
 const MAT_PAD = new THREE.MeshStandardMaterial({ color: 0x15161a, roughness: 0.95, metalness: 0, flatShading: true })
+const SOFT_SKIN = 0.004 // m: soft.js PARTICLE_RADIUS, the particles sit this far inside the drawn surface
 // poly-mailer bag: light grey plastic film
 const MAT_BAG = new THREE.MeshStandardMaterial({ color: 0xd4d7da, roughness: 0.38, metalness: 0.05 })
 const DARK_BODY = /^pelvis$|_hip_pitch_link$|_ankle_roll_link$|_hand_/
@@ -413,7 +414,14 @@ function applySoft(world, positions) {
     attr.array.set(positions.subarray(o, o + 3 * n))
     attr.needsUpdate = true
     mesh.visible = positions[o + 2] > 0.5
-    if (mesh.visible) mesh.geometry.computeVertexNormals()
+    if (mesh.visible) {
+      // the bag collides 4 mm outside its particles (its skin): draw the surface there too
+      const geo = mesh.geometry
+      geo.computeVertexNormals()
+      const nrm = geo.attributes.normal.array, pos = attr.array
+      for (let k = 0; k < pos.length; k++) pos[k] += SOFT_SKIN * nrm[k]
+      geo.computeVertexNormals()
+    }
     o += 3 * n
   }
 }

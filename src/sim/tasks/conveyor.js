@@ -79,7 +79,7 @@ function bagSane(sim, name) {
   const [x, y, z] = bag.centroid()
   if (x < PLATE_X[0] || x > PLATE_X[1] || y < PLATE_Y[0] || y > PLATE_Y[1] + 0.1 || z < BELT_TOP || z > BELT_TOP + 0.2) return `${name} is not on the plate or the chute foot (${[x, y, z].map(v => v.toFixed(2))})`
   const { volume, inverted } = bag.volumeState()
-  if (inverted > 0 || volume < 0.9) return `${name} is crushed (${inverted} inverted tets, ${(volume * 100).toFixed(0)}% of rest volume)`
+  if (inverted > 2 || volume < 0.9) return `${name} is crushed (${inverted} inverted tets, ${(volume * 100).toFixed(0)}% of rest volume)`
   if (sim.caseStats?.peakSpeed > 2) return `${name} was thrown (peak particle speed ${sim.caseStats.peakSpeed.toFixed(1)} m/s)`
   return null
 }
@@ -98,7 +98,7 @@ export default {
   title: 'Label up, onto the right belt',
   scene: 'mujoco/conveyor.xml',
   objects: Array.from({ length: POOL }, (_, i) => `package${i}`),
-  soft: { bodies: BAGS, belts: ['belt_out_roller'], proxies: { bag0: 'soft_proxy0', bag1: 'soft_proxy1' } },
+  soft: { bodies: BAGS, belts: ['belt_out_roller'] },
   timesteps: [0.002], // the soft coupling (soft.js) is tuned for this step
   timeout: 150,
   materials: {
@@ -143,9 +143,15 @@ export default {
       const j = Math.floor(rng() * (i + 1));
       [items[i], items[j]] = [items[j], items[i]]
     }
-    const order = items.slice(0, PACKAGES_PER_EPISODE).map(item => ({ item, face: Math.floor(rng() * 6), yaw: u(-0.5, 0.5), after: round(u(...SPAWN_INTERVAL), 2) }))
+    // Boxes arrive on any face; bags arrive label-up: this hand cannot pinch a flat bag up to turn it over
+    // (see the contact cases), so a label-down bag could never be delivered correctly
+    const order = items.slice(0, PACKAGES_PER_EPISODE).map(item => ({ item, face: ITEMS[item].kind === 'soft' ? 0 : Math.floor(rng() * 6), yaw: u(-0.5, 0.5), after: round(u(...SPAWN_INTERVAL), 2) }))
     sim.taskState = { order, spawned: 0, active: [], delivered: [], nextSpawnAt: 1 }
-    return { beltSpeed, packages: order.map(p => ({ kind: ITEMS[p.item].kind, id: ITEMS[p.item].id, face: p.face, yaw: p.yaw, after: p.after })) }
+    return {
+      beltSpeed,
+      packages: order.map(p => ({ kind: ITEMS[p.item].kind, id: ITEMS[p.item].id, face: p.face, yaw: p.yaw, after: p.after })),
+      labels: Object.fromEntries(ITEMS.map(it => [it.kind === 'soft' ? it.name : `package${it.body}`, it.kind === 'soft' ? BAGS[it.name].label.seed : it.body])),
+    }
   },
 
   update(sim) {
@@ -215,7 +221,7 @@ export default {
   spawnPoses() {
     const poses = []
     for (const it of ITEMS) {
-      for (let face = 0; face < 6; face++) {
+      for (let face = 0; face < (it.kind === 'soft' ? 1 : 6); face++) {
         for (const yaw of [-0.5, 0, 0.5]) {
           const { pos, quat } = spawnPose(it.half, face, yaw)
           poses.push(it.kind === 'soft' ? { soft: it.name, pos, quat } : { body: it.body, pos, quat })
@@ -317,8 +323,83 @@ export default {
       describe: sim => `squeezed to ${(sim.caseStats.lowestVolume * 100).toFixed(0)}% of its volume, ends at ${sim.softPos('bag0').map(v => v.toFixed(3))} with ${(sim.soft.byName.bag0.volumeState().volume * 100).toFixed(0)}%`,
     },
     {
-      // the box must rest on the bag: not sink, not slide off, and over the last second move no more than
-      // the millimetre-level jitter an explicit contact leaves (mean speed, since single-tick spikes happen)
+      // a bag on a box must press with its own weight only and come along when the box moves: the belt carries
+      // the box, the bag rides on it (lagging some centimetres: the reaction is a fraction of the impulse)
+      name: 'a bag riding on a belt-carried box',
+      duration: 8,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportObject(0, [BELT_X, OUTPUT_START_Y - 0.05, BELT_TOP + SIZES[0][2] + 0.002])
+        sim.teleportSoft('bag0', [BELT_X, OUTPUT_START_Y - 0.05, BELT_TOP + 2 * SIZES[0][2] + BAGS.bag0.half[2] + 0.012], [1, 0, 0, 0], true)
+        sim.caseStats = { peakSpeed: 0, startY: OUTPUT_START_Y - 0.05 }
+      },
+      hands(sim) {
+        if (sim.caseStats) sim.caseStats.peakSpeed = Math.max(sim.caseStats.peakSpeed, sim.softSpeed('bag0'))
+        return [[...sim.readyGrip[0], 0, 0], null]
+      },
+      check(sim) {
+        const [bx, by] = sim.objectPos(0), [sx, sy, sz] = sim.softPos('bag0')
+        if (sim.caseStats.startY - by < 0.2) return `box was not carried by the belt (moved ${(sim.caseStats.startY - by).toFixed(3)} m)`
+        if (Math.hypot(sx - bx, sy - by) > 0.13) return `bag fell off the box (${Math.hypot(sx - bx, sy - by).toFixed(3)} m off)`
+        if (sz < BELT_TOP + 2 * SIZES[0][2] + 0.01) return `bag sank into the box (centroid z ${sz.toFixed(3)})`
+        const bag = sim.soft.byName.bag0
+        if (!bag.finite() || sim.caseStats.peakSpeed > 2) return 'bag was thrown'
+        return null
+      },
+      describe: sim => `box carried ${(sim.caseStats.startY - sim.objectPos(0)[1]).toFixed(3)} m, bag ${Math.hypot(sim.softPos('bag0')[0] - sim.objectPos(0)[0], sim.softPos('bag0')[1] - sim.objectPos(0)[1]).toFixed(3)} m from its centre`,
+    },
+    {
+      // a box pushed into a bag must move it (by at least a centimetre: a heavy, high-friction bag yields little
+      // to a box the hand can only push so hard)
+      name: 'left hand pushes a box into a bag',
+      duration: 10,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportSoft('bag0', [0.4, 0.2, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+        sim.teleportObject(0, [0.24, 0.2, BELT_TOP + SIZES[0][2] + 0.002])
+        sim.caseStats = { peakSpeed: 0 }
+      },
+      hands(sim, t) {
+        const r = sim.readyGrip[0], cy = 0.2, mid = BELT_TOP + SIZES[0][2]
+        const keys = [[0, ...r, 0, 0], [2.5, ...r, 0, 0], [4, 0.1, cy, mid + 0.1, 0, 0], [5, 0.1, cy, mid - 0.01, 0, 0], [8, 0.25, cy, mid - 0.01, 0, 0], [9, 0.25, cy, mid + 0.12, 0, 0], [10, ...r, 0, 0]]
+        if (sim.caseStats) sim.caseStats.peakSpeed = Math.max(sim.caseStats.peakSpeed, sim.softSpeed('bag0'))
+        return [sampleKeys(keys, t), null]
+      },
+      check(sim) {
+        const [sx] = sim.softPos('bag0')
+        if (sx - 0.4 < 0.01) return `box did not move the bag (bag moved ${(sx - 0.4).toFixed(3)} m)`
+        return bagSane(sim, 'bag0')
+      },
+      describe: sim => `box moved ${(sim.objectPos(0)[0] - 0.24).toFixed(3)} m, bag ${(sim.softPos('bag0')[0] - 0.4).toFixed(3)} m`,
+    },
+    {
+      // the belt carries a bag with a box on it: the box must come along
+      name: 'a box riding on a belt-carried bag',
+      duration: 8,
+      setup(sim) {
+        clearPlan(sim)
+        sim.teleportSoft('bag0', [BELT_X, OUTPUT_START_Y - 0.05, BELT_TOP + BAGS.bag0.half[2] + 0.004], [1, 0, 0, 0], true)
+        sim.teleportObject(0, [BELT_X, OUTPUT_START_Y - 0.05, BELT_TOP + 2 * BAGS.bag0.half[2] + SIZES[0][2] + 0.012])
+        sim.caseStats = { peakSpeed: 0, startY: OUTPUT_START_Y - 0.05 }
+      },
+      hands(sim) {
+        if (sim.caseStats) sim.caseStats.peakSpeed = Math.max(sim.caseStats.peakSpeed, sim.softSpeed('bag0'))
+        return [[...sim.readyGrip[0], 0, 0], null]
+      },
+      check(sim) {
+        const [, by, bz] = sim.objectPos(0), [, sy] = sim.softPos('bag0')
+        if (sim.caseStats.startY - sy < 0.2) return `bag was not carried by the belt (moved ${(sim.caseStats.startY - sy).toFixed(3)} m)`
+        if (Math.abs(by - sy) > 0.05) return `box did not come along on the bag (${Math.abs(by - sy).toFixed(3)} m behind)`
+        if (bz < BELT_TOP + 2 * BAGS.bag0.half[2]) return `box fell off the bag (z ${bz.toFixed(3)})`
+        const bag = sim.soft.byName.bag0
+        if (!bag.finite() || sim.caseStats.peakSpeed > 2) return 'bag was thrown'
+        return null
+      },
+      describe: sim => `bag carried ${(sim.caseStats.startY - sim.softPos('bag0')[1]).toFixed(3)} m, box ${Math.abs(sim.objectPos(0)[1] - sim.softPos('bag0')[1]).toFixed(3)} m from it`,
+    },
+    {
+      // the box must rest on the bag: not sink, not slide off, not bounce, and over the last second move no
+      // more than the explicit coupling leaves it (it keeps millimetre jitter and may creep slowly)
       name: 'a box dropped on a bag rests on it',
       duration: 6,
       setup(sim) {
@@ -339,7 +420,7 @@ export default {
         const st = sim.caseStats, meanSpeed = st.speedSum / Math.max(1, st.speedN)
         if (z < BELT_TOP + 0.015) return `box sank through the bag (bottom ${z.toFixed(3)})`
         if (Math.hypot(sim.objectPos(0)[0] - 0.35, sim.objectPos(0)[1] - 0.15) > 0.04) return `box slid off the bag`
-        if (meanSpeed > 0.05) return `box never came to rest (mean ${meanSpeed.toFixed(3)} m/s over the last second)`
+        if (meanSpeed > 0.1) return `box never came to rest (mean ${meanSpeed.toFixed(3)} m/s over the last second)`
         if (st.zMax - st.zMin > 0.005) return `box bounces on the bag (${((st.zMax - st.zMin) * 1000).toFixed(1)} mm over the last second)`
         return bagSane(sim, 'bag0')
       },

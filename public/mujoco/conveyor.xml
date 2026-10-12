@@ -172,44 +172,35 @@
 
     <body name="package0" pos="-3.0 0 0.031">
       <freejoint name="package0_free"/>
-      <geom name="package0" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package0" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label0" class="label" size="0.05 0.034 0.0002" pos="0 0 0.0302" material="label"/>
     </body>
     <body name="package1" pos="-3.3 0 0.031">
       <freejoint name="package1_free"/>
-      <geom name="package1" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package1" class="object" type="box" size="0.06 0.04 0.03" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label1" class="label" size="0.05 0.034 0.0002" pos="0 0 0.0302" material="label"/>
     </body>
     <body name="package2" pos="-3.6 0 0.026">
       <freejoint name="package2_free"/>
-      <geom name="package2" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package2" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label2" class="label" size="0.05 0.035 0.0002" pos="0 0 0.0252" material="label"/>
     </body>
     <body name="package3" pos="-3.9 0 0.026">
       <freejoint name="package3_free"/>
-      <geom name="package3" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package3" class="object" type="box" size="0.075 0.05 0.025" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label3" class="label" size="0.05 0.035 0.0002" pos="0 0 0.0252" material="label"/>
     </body>
     <body name="package4" pos="-4.2 0 0.041">
       <freejoint name="package4_free"/>
-      <geom name="package4" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package4" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label4" class="label" size="0.034 0.034 0.0002" pos="0 0 0.0402" material="label"/>
     </body>
     <body name="package5" pos="-4.5 0 0.041">
       <freejoint name="package5_free"/>
-      <geom name="package5" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package5" class="object" type="box" size="0.04 0.04 0.04" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label5" class="label" size="0.034 0.034 0.0002" pos="0 0 0.0402" material="label"/>
     </body>
 
-    <!-- Soft-parcel proxies: one mocap box per bag, placed and sized by the soft solver every step to the
-         bag's current fitted box. It collides with the rigid packages only (contype bit 4), so a box resting on
-         a bag rests on MuJoCo's own contact instead of an explicit penalty; hands and fixtures never see it. -->
-    <body name="soft_proxy0" mocap="true" pos="-5 0 0.05">
-      <geom name="soft_proxy0" type="box" size="0.08 0.06 0.022" contype="0" conaffinity="4" group="3" solref="0.01 1" priority="1" friction="0.6 0.005 0.0001"/>
-    </body>
-    <body name="soft_proxy1" mocap="true" pos="-5.3 0 0.05">
-      <geom name="soft_proxy1" type="box" size="0.07 0.05 0.025" contype="0" conaffinity="4" group="3" solref="0.01 1" priority="1" friction="0.6 0.005 0.0001"/>
-    </body>
   </worldbody>
 
   <actuator>

@@ -98,7 +98,7 @@ for (const task of tasks) {
       const seed = 21 + 4 * k // the task's randomization (bag mass, friction, softness, box masses) differs per seed
       const got = []
       const scripted = { ...task, autopilot: c.hands }
-      const probe = new TaskSim(mj, m, scripted, { seed, autopilot: true, compiled: base, meta: { ...meta, session: `sim-check/${c.name}` }, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
+      const probe = new TaskSim(mj, m, scripted, { seed, autopilot: true, compiled: base, meta: { ...meta, session: `sim-check/${c.name}/seed${seed}` }, onEpisode: e => got.push({ header: e.header, frames: e.frames.slice() }) })
       probe.scheduleAtFrame(Math.round(SOLVE_AT_S / probe.controlDt), () => c.setup(probe))
       while (!got.length && probe.steps < (SOLVE_AT_S + c.duration) / probe.dt) probe.step()
       if (!got.length) probe.abort('aborted')

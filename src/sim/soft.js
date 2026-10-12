@@ -6,10 +6,12 @@
 // Coupling with MuJoCo is through its compiled geoms: every colliding geom (robot hull meshes as fitted 26-plane polytopes,
 // scene boxes, cylinders, planes, spheres, capsules, the rigid parcels) is a kinematic collider for the
 // particles and surface samples, with Coulomb friction against the surface's actual velocity (a turning roller
-// carries a bag), and a reaction goes back to MuJoCo bodies through xfrc_applied (see REACTION_SCALE: a
-// documented fraction of the contact impulse, so a hand feels part of the bag's weight and a bag pushes a
-// rigid parcel). Soft-soft contact keeps each bag's samples out of the other bag's bounding box. A weak shape
-// match toward the undeformed lattice lets a crushed bag spring back instead of staying inverted.
+// carries a bag), and a reaction goes back to MuJoCo bodies through xfrc_applied (see TUNING.reactionScale:
+// a documented fraction of the contact impulse, so a hand feels part of the bag's weight, a bag presses on a
+// rigid parcel, and a parcel rests on a bag with millimetre jitter). Soft-soft contact keeps each bag's
+// samples out of the other bag's 26-plane bound, with friction. A weak shape match toward the undeformed
+// lattice plus a layer-ordering constraint lets a crushed bag spring back instead of staying inverted. Every
+// contact is inelastic in the velocity sense: a push out of a collider never becomes speed.
 //
 // The solver constants below are part of what a recorded episode depends on (TaskSim writes them into the
 // header as soft_solver); the coupling is tuned for a 2 ms MuJoCo step, which the conveyor task pins.
@@ -19,25 +21,24 @@ const PARTICLE_RADIUS = 0.004   // contact offset: a bag's skin
 const SUBSTEPS = 2              // per MuJoCo step (1 ms at the 2 ms step the soft tasks pin)
 const ITERATIONS = 2            // constraint passes per substep
 const LAYER_GAP = 0.5           // a particle column's layers keep at least this fraction of their rest spacing (no inverted lattice)
-const PROXY_MARGIN = 0.001      // m: the proxy box's faces sit this far outside the bag's surface samples
-const PROXY_TAU = 0.05          // s: low-pass on the proxy box's pose and size
 // Tunable coupling constants, mutable so headless sweeps can A/B them; recorded in every header via SOFT_SOLVER()
 export const TUNING = {
-  reactionScale: 0.5,   // see the note below (0.15 before the inelastic velocity pass; swept over seeds since)
+  reactionScale: 0.5,   // see the note below
   normalDamping: 1.0,   // N s/m per contact sample on the relative normal approach speed (a box resting on a bag buzzes without it)
+  frictionScale: 0.25,  // fraction of the friction impulse handed to MuJoCo bodies (the full impulse shakes a box resting on a bag: swept)
   shapeMatch: 0.02,     // per substep: pull toward the best-fit rigid placement of the rest lattice
   forceTau: 0,          // s: low-pass on the reaction force (0 = none)
 }
 const MAX_LIFT = 0.02           // a particle is pushed out of a collider by at most this per substep (tunnelling guard)
 const SOFT_PRIORITY = 2         // like the rigid objects: a higher-priority geom's friction wins (the chute), a tie takes the larger
 // Reaction on MuJoCo bodies: the normal part is a penalty on how far a contact pushed the sample this substep,
-// with stiffness TUNING.reactionScale x (sample mass / substep^2): that is REACTION_SCALE times the impulse the
+// with stiffness TUNING.reactionScale x (sample mass / substep^2): that is reactionScale times the impulse the
 // sample actually received, so the transferred force is consistent across bag mass and timestep (at rest it
-// is REACTION_SCALE x the resting weight on the body). The full impulse is an explicit, stiff exchange that
-// bounces a 400 g box and launches it (measured, with and without low-pass filtering); 0.15 is stable for the
-// bodies in these scenes. The tangential (friction) part is the sample's impulse as a force over the step.
+// is reactionScale x the resting weight on the body). The full impulse is an explicit, stiff exchange that
+// bounces a 400 g box (measured, with and without low-pass filtering); 0.5 with the inelastic velocity pass
+// was swept over seeds. The tangential (friction) part is the sample's impulse as a force over the step.
 /** Everything in this file a replay depends on, for the episode header. */
-export const SOFT_SOLVER = () => ({ substeps: SUBSTEPS, iterations: ITERATIONS, particleRadius: PARTICLE_RADIUS, maxLift: MAX_LIFT, reactionScale: TUNING.reactionScale, shapeMatch: TUNING.shapeMatch, forceTau: TUNING.forceTau, proxyMargin: PROXY_MARGIN, proxyTau: PROXY_TAU, layerGap: LAYER_GAP, normalDamping: TUNING.normalDamping, surfaceSamples: 4 })
+export const SOFT_SOLVER = () => ({ substeps: SUBSTEPS, iterations: ITERATIONS, particleRadius: PARTICLE_RADIUS, maxLift: MAX_LIFT, reactionScale: TUNING.reactionScale, frictionScale: TUNING.frictionScale, shapeMatch: TUNING.shapeMatch, forceTau: TUNING.forceTau, layerGap: LAYER_GAP, normalDamping: TUNING.normalDamping, surfaceSamples: 4 })
 export const DEBUG = { on: false, contacts: 0, lift: 0, slip: 0, fric: 0, surf: [0, 0, 0], mu: 0, track: -1, log: [] }
 // Collision samples: the particles plus, on every surface triangle, its centroid and three edge midpoints.
 // Particles alone (radius 4 mm, spacing 25 mm) let a 17 mm finger pass between them and impale the bag.
@@ -174,7 +175,7 @@ export class SoftBody {
     // must not become velocity: an inelastic contact), the last contact normal and the surface's speed along it
     this.dop = new Float64Array(NDOP) // world-space 26-plane bound of the particles, for bag-bag contact
     this.R = Float64Array.from([1, 0, 0, 0, 1, 0, 0, 0, 1]) // last best-fit rotation of the rest lattice (shape matching)
-    this.moved = false
+    this.pressedByHand = false // a hand did
     this.pressed = false // a moving body (hand, box) touched this bag during the last step
     this.push = new Float64Array(3 * this.n)
     this.contactN = new Float64Array(3 * this.n)
@@ -218,7 +219,6 @@ export class SoftBody {
     this.R.set([1 - 2 * (qy * qy + qz * qz), 2 * (qx * qy - w * qz), 2 * (qx * qz + w * qy),
       2 * (qx * qy + w * qz), 1 - 2 * (qx * qx + qz * qz), 2 * (qy * qz - w * qx),
       2 * (qx * qz - w * qy), 2 * (qy * qz + w * qx), 1 - 2 * (qx * qx + qy * qy)])
-    this.moved = true // the proxy jumps to the new pose instead of sliding there
   }
 
   /** Fits the 26-plane bound to the current particles (world frame). */
@@ -337,6 +337,14 @@ export class SoftBody {
     }
   }
 
+  /** Fastest particle (m/s). */
+  maxSpeed() {
+    const { v } = this
+    let s = 0
+    for (let i = 0; i < this.n; i++) s = Math.max(s, v[3 * i] * v[3 * i] + v[3 * i + 1] * v[3 * i + 1] + v[3 * i + 2] * v[3 * i + 2])
+    return Math.sqrt(s)
+  }
+
   /** Mean particle speed (m/s). */
   speed() {
     const { v } = this
@@ -441,20 +449,10 @@ export class SoftWorld {
    * A roller belt (cylinders named with a `belts` prefix) is collided as one flat moving surface: particles are
    * larger than the gaps between rollers and would wedge into them, where the two rollers' friction cancels.
    */
-  constructor(mj, m, defs, { handOfBody, belts = [], proxies = {} } = {}) {
+  constructor(mj, m, defs, { handOfBody, belts = [] } = {}) {
     this.mj = mj
     this.m = m
     this.belts = belts
-    // mocap proxy boxes (see the scene XML): { bodyName } per soft body, resolved to mocap and geom ids
-    this.proxyGeoms = new Set()
-    this.proxies = Object.fromEntries(Object.entries(proxies).map(([name, body]) => {
-      const b = mj.mj_name2id(m, mj.mjtObj.mjOBJ_BODY.value, body)
-      if (b < 0 || m.body_mocapid[b] < 0) throw new Error(`soft: ${body} is not a mocap body`)
-      const geom = mj.mj_name2id(m, mj.mjtObj.mjOBJ_GEOM.value, body)
-      if (geom < 0) throw new Error(`soft: proxy ${body} needs a geom of the same name`)
-      this.proxyGeoms.add(geom)
-      return [name, { mocap: m.body_mocapid[b], geom }]
-    }))
     this.bodies = Object.entries(defs).map(([name, def]) => new SoftBody(name, def))
     this.byName = Object.fromEntries(this.bodies.map(b => [b.name, b]))
     this.total = this.bodies.reduce((s, b) => s + b.n, 0)
@@ -480,7 +478,6 @@ export class SoftWorld {
     const rollers = this.belts.map(() => [])
     for (let g = 0; g < m.ngeom; g++) {
       if (!m.geom_contype[g] && !m.geom_conaffinity[g]) continue
-      if (this.proxyGeoms.has(g)) continue // a bag's own proxy is not an obstacle to it
       const type = m.geom_type[g]
       const gname = this.mj.mj_id2name(m, this.mj.mjtObj.mjOBJ_GEOM.value, g) ?? ''
       const belt = this.belts.findIndex(prefix => gname.startsWith(prefix))
@@ -536,8 +533,16 @@ export class SoftWorld {
     return list
   }
 
+  /** Per-body physics (mass, friction, compliances, damping); also clears per-episode state. */
   setPhysics(params = {}) {
     for (const b of this.bodies) b.setPhysics(params[b.name] ?? {})
+    this.forceFilt.fill(0)
+    this.touching.fill(0)
+  }
+
+  /** Places a body undeformed at pos/quat (inactive = parked, not simulated). */
+  place(name, pos, quat = [1, 0, 0, 0], active = true) {
+    this.byName[name].place(pos, quat, active)
   }
 
   /** Writes every body's particle positions, in order, into out (Float32Array or Float64Array). */
@@ -547,10 +552,10 @@ export class SoftWorld {
     return out
   }
 
-  /** Restores every body's particle positions from a flat array (velocities zeroed). */
+  /** Restores every body's particle positions from a flat array (velocities zeroed, orientation refitted). */
   scatter(positions) {
     let o = 0
-    for (const b of this.bodies) { b.x.set(positions.subarray ? positions.subarray(o, o + 3 * b.n) : positions.slice(o, o + 3 * b.n)); b.xPrev.set(b.x); b.v.fill(0); b.updateAabb(); o += 3 * b.n }
+    for (const b of this.bodies) { b.x.set(positions.subarray ? positions.subarray(o, o + 3 * b.n) : positions.slice(o, o + 3 * b.n)); b.xPrev.set(b.x); b.v.fill(0); b.updateAabb(); b.shapeMatch(0); o += 3 * b.n }
   }
 
   finite() { return this.bodies.every(b => b.finite()) }
@@ -567,70 +572,18 @@ export class SoftWorld {
     this.touching.fill(0)
     this.maxPen = 0
     const active = this.bodies.filter(b => b.active)
-    for (const b of active) b.pressed = false
+    for (const b of active) { b.pressed = false; b.pressedByHand = false }
     if (active.length) {
       for (let s = 0; s < SUBSTEPS; s++) {
         for (const b of active) this.substep(b, d, dt)
         if (active.length > 1) this.softContacts(active)
       }
     }
-    this.updateProxies(d)
     if (TUNING.forceTau > 0) {
       const alpha = Math.min(1, this.dtStep / TUNING.forceTau)
       for (let i = 0; i < this.force.length; i++) this.forceFilt[i] += (this.force[i] - this.forceFilt[i]) * alpha
       d.xfrc_applied.set(this.forceFilt)
     } else d.xfrc_applied.set(this.force)
-  }
-
-  // Each bag's proxy box: centred on the particles' extents along the bag's own axes (last shape-match
-  // rotation), half extents the particle extents plus the skin and a 1 mm margin (a box resting on the proxy
-  // then sits just above the surface samples, so it does not keep nudging the particles), pose and size
-  // low-passed over PROXY_TAU so particle jitter does not shake what rests on it; a parked bag takes its proxy
-  // along (far from the scene) at once
-  updateProxies(d) {
-    const { m } = this
-    const alpha = Math.min(1, this.dtStep / PROXY_TAU)
-    for (const b of this.bodies) {
-      const p = this.proxies[b.name]
-      if (!p) continue
-      const { x, n, R } = b
-      const lo = [Infinity, Infinity, Infinity], hi = [-Infinity, -Infinity, -Infinity]
-      for (let i = 0; i < n; i++) {
-        const px = x[3 * i], py = x[3 * i + 1], pz = x[3 * i + 2]
-        for (let a = 0; a < 3; a++) { // projection on column a of R
-          const v = R[a] * px + R[3 + a] * py + R[6 + a] * pz
-          if (v < lo[a]) lo[a] = v
-          if (v > hi[a]) hi[a] = v
-        }
-      }
-      const mid = [0, 1, 2].map(a => (lo[a] + hi[a]) / 2)
-      const half = [0, 1, 2].map(a => (hi[a] - lo[a]) / 2 + PARTICLE_RADIUS + PROXY_MARGIN)
-      // centre back in the world frame: R * mid
-      const cx = R[0] * mid[0] + R[1] * mid[1] + R[2] * mid[2], cy = R[3] * mid[0] + R[4] * mid[1] + R[5] * mid[2], cz = R[6] * mid[0] + R[7] * mid[1] + R[8] * mid[2]
-      const k = b.moved ? 1 : alpha // a teleport (place) moves the proxy at once
-      b.moved = false
-      const mp = d.mocap_pos, o = 3 * p.mocap
-      mp[o] += (cx - mp[o]) * k; mp[o + 1] += (cy - mp[o + 1]) * k; mp[o + 2] += (cz - mp[o + 2]) * k
-      for (let a = 0; a < 3; a++) half[a] = m.geom_size[3 * p.geom + a] + (half[a] - m.geom_size[3 * p.geom + a]) * k
-      // quaternion (w, x, y, z) of R
-      const tr = R[0] + R[4] + R[8]
-      let qw, qx, qy, qz
-      if (tr > 0) { const s = Math.sqrt(tr + 1) * 2; qw = 0.25 * s; qx = (R[7] - R[5]) / s; qy = (R[2] - R[6]) / s; qz = (R[3] - R[1]) / s }
-      else if (R[0] > R[4] && R[0] > R[8]) { const s = Math.sqrt(1 + R[0] - R[4] - R[8]) * 2; qw = (R[7] - R[5]) / s; qx = 0.25 * s; qy = (R[1] + R[3]) / s; qz = (R[2] + R[6]) / s }
-      else if (R[4] > R[8]) { const s = Math.sqrt(1 + R[4] - R[0] - R[8]) * 2; qw = (R[2] - R[6]) / s; qx = (R[1] + R[3]) / s; qy = 0.25 * s; qz = (R[5] + R[7]) / s }
-      else { const s = Math.sqrt(1 + R[8] - R[0] - R[4]) * 2; qw = (R[3] - R[1]) / s; qx = (R[2] + R[6]) / s; qy = (R[5] + R[7]) / s; qz = 0.25 * s }
-      const mq = d.mocap_quat, q = 4 * p.mocap
-      if (mq[q] * qw + mq[q + 1] * qx + mq[q + 2] * qy + mq[q + 3] * qz < 0) { qw = -qw; qx = -qx; qy = -qy; qz = -qz } // same hemisphere
-      mq[q] += (qw - mq[q]) * k; mq[q + 1] += (qx - mq[q + 1]) * k; mq[q + 2] += (qy - mq[q + 2]) * k; mq[q + 3] += (qz - mq[q + 3]) * k
-      const qn = Math.sqrt(mq[q] * mq[q] + mq[q + 1] * mq[q + 1] + mq[q + 2] * mq[q + 2] + mq[q + 3] * mq[q + 3]) || 1
-      mq[q] /= qn; mq[q + 1] /= qn; mq[q + 2] /= qn; mq[q + 3] /= qn
-      m.geom_size[3 * p.geom] = half[0]; m.geom_size[3 * p.geom + 1] = half[1]; m.geom_size[3 * p.geom + 2] = half[2]
-      m.geom_rbound[p.geom] = Math.sqrt(half[0] * half[0] + half[1] * half[1] + half[2] * half[2])
-      // MuJoCo's broad phase uses the compile-time bounding box: keep it in step with the size
-      const ab = 6 * p.geom
-      m.geom_aabb[ab] = 0; m.geom_aabb[ab + 1] = 0; m.geom_aabb[ab + 2] = 0
-      m.geom_aabb[ab + 3] = half[0]; m.geom_aabb[ab + 4] = half[1]; m.geom_aabb[ab + 5] = half[2]
-    }
   }
 
   substep(b, d, dt) {
@@ -716,7 +669,7 @@ export class SoftWorld {
     const r = PARTICLE_RADIUS
     const out = this.out, local = this.local, wn = this.worldN, vel = this.vel, pt = this.pt, prev = this.prev
     const mass = params.mass / n
-    const gx = d.geom_xpos
+    const gx = d.geom_xpos, xipos = d.xipos, subtree = d.subtree_com, cvel = d.cvel
     const total = n + nSamples
     for (const c of this.colliders) {
       const g3 = 3 * c.geom
@@ -782,18 +735,18 @@ export class SoftWorld {
           vel.fill(0)
           if (c.dynamic) {
             const o = 6 * c.body
-            for (let k = 0; k < 6; k++) vel[k] = d.cvel[o + k]
+            for (let k = 0; k < 6; k++) vel[k] = cvel[o + k]
           } else if (c.virtual) {
             // rim velocity at the top of a roller: omega x (0, 0, R)
             const o = 6 * c.virtual.spinBody, R = c.virtual.spinRadius
-            vel[3] = d.cvel[o + 1] * R; vel[4] = -d.cvel[o] * R; vel[5] = 0
+            vel[3] = cvel[o + 1] * R; vel[4] = -cvel[o] * R; vel[5] = 0
           }
           velRead = true
         }
         let sx = vel[3], sy = vel[4], sz = vel[5]
         if (c.dynamic) {
           const root = 3 * m.body_rootid[c.body]
-          const rx = pt[0] - d.subtree_com[root], ry = pt[1] - d.subtree_com[root + 1], rz = pt[2] - d.subtree_com[root + 2]
+          const rx = pt[0] - subtree[root], ry = pt[1] - subtree[root + 1], rz = pt[2] - subtree[root + 2]
           sx += vel[1] * rz - vel[2] * ry; sy += vel[2] * rx - vel[0] * rz; sz += vel[0] * ry - vel[1] * rx
         }
         // correction of the sample point: out along the normal, then the tangential slip relative to the
@@ -826,7 +779,7 @@ export class SoftWorld {
           x[sc] += mx * kc; x[sc + 1] += my * kc; x[sc + 2] += mz * kc
         }
         touched = true
-        // reaction on the body (see REACTION_SCALE): penalty along the normal on this substep's push, the
+        // reaction on the body (see TUNING.reactionScale): penalty along the normal on this substep's push, the
         // friction impulse as a force over the MuJoCo step; the sample carries one particle's mass or the
         // triangle's share
         if (c.dynamic) {
@@ -836,9 +789,9 @@ export class SoftWorld {
           const velN = i < n ? (b.v[sa] * wn[0] + b.v[sa + 1] * wn[1] + b.v[sa + 2] * wn[2]) : ((wa * b.v[sa] + wb * b.v[sb] + wc * b.v[sc]) * wn[0] + (wa * b.v[sa + 1] + wb * b.v[sb + 1] + wc * b.v[sc + 1]) * wn[1] + (wa * b.v[sa + 2] + wb * b.v[sb + 2] + wc * b.v[sc + 2]) * wn[2])
           const approach = Math.max(0, sn - velN)
           const fn = -(TUNING.reactionScale * ms * lift / (dt * dt) + TUNING.normalDamping * approach) / SUBSTEPS
-          const scale = -ms / (dt * this.dtStep)
+          const scale = -TUNING.frictionScale * ms / (dt * this.dtStep)
           const fx = (mx - wn[0] * lift) * scale + fn * wn[0], fy = (my - wn[1] * lift) * scale + fn * wn[1], fz = (mz - wn[2] * lift) * scale + fn * wn[2]
-          const ix = d.xipos[3 * c.body], iy = d.xipos[3 * c.body + 1], iz = d.xipos[3 * c.body + 2]
+          const ix = xipos[3 * c.body], iy = xipos[3 * c.body + 1], iz = xipos[3 * c.body + 2]
           const ax = pt[0] - ix, ay = pt[1] - iy, az = pt[2] - iz
           const f = this.force, o = 6 * c.body
           f[o] += fx; f[o + 1] += fy; f[o + 2] += fz
@@ -849,6 +802,7 @@ export class SoftWorld {
         const hand = this.handOfBody[c.body]
         if (hand >= 0) this.touching[hand] = 1
         if (c.dynamic) b.pressed = true
+        if (hand >= 0) b.pressedByHand = true
       }
     }
   }
@@ -881,6 +835,8 @@ export class SoftWorld {
             wsum = sampleWsum[i - n]
             for (let k = 0; k < 3; k++) pt[k] = wa * x[sa + k] + wb * x[sb + k] + wc * x[sc + k]
           }
+          const ob = other.aabb
+          if (pt[0] + r < ob[0] || pt[0] - r > ob[3] || pt[1] + r < ob[1] || pt[1] - r > ob[4] || pt[2] + r < ob[2] || pt[2] - r > ob[5]) continue
           let best = -Infinity, bi = 0
           for (let k = 0; k < NDOP; k++) {
             const d = DOP_DIRS[3 * k] * pt[0] + DOP_DIRS[3 * k + 1] * pt[1] + DOP_DIRS[3 * k + 2] * pt[2] - planes[k]
@@ -915,13 +871,13 @@ export class SoftWorld {
 
   /** Deepest particle penetration into any collider at the current state (m), without moving anything. */
   measurePenetration(d) {
-    const saved = this.bodies.map(b => ({ x: Float64Array.from(b.x), xPrev: Float64Array.from(b.xPrev), v: Float64Array.from(b.v), aabb: Float64Array.from(b.aabb) }))
+    const saved = this.bodies.map(b => ({ x: Float64Array.from(b.x), xPrev: Float64Array.from(b.xPrev), v: Float64Array.from(b.v), aabb: Float64Array.from(b.aabb), push: Float64Array.from(b.push), near: Uint8Array.from(b.near), inContact: Uint8Array.from(b.inContact), pressed: b.pressed, pressedByHand: b.pressedByHand }))
     const force = Float64Array.from(this.force), touching = Uint8Array.from(this.touching)
     this.maxPen = 0
     const dt = this.m.opt.timestep / SUBSTEPS
     for (const b of this.bodies) if (b.active) { b.updateAabb(); this.collide(b, d, dt) }
     const pen = this.maxPen
-    this.bodies.forEach((b, i) => { b.x.set(saved[i].x); b.xPrev.set(saved[i].xPrev); b.v.set(saved[i].v); b.aabb.set(saved[i].aabb) })
+    this.bodies.forEach((b, i) => { const sv = saved[i]; b.x.set(sv.x); b.xPrev.set(sv.xPrev); b.v.set(sv.v); b.aabb.set(sv.aabb); b.push.set(sv.push); b.near.set(sv.near); b.inContact.set(sv.inContact); b.pressed = sv.pressed; b.pressedByHand = sv.pressedByHand })
     this.force.set(force)
     this.touching.set(touching)
     return pen
@@ -936,7 +892,7 @@ export class SoftWorld {
   }
 
   /** Header description for replay. */
-  /** Header description for replay and offline rendering: lattice, per-episode params, surface triangles, top-face UVs and label (no JS needed to draw a bag). */
+  /** Header description for replay and offline rendering: lattice, per-episode params, surface triangles, top-face UVs and the label seed (the label itself is drawn by src/components/shippingLabel.js). */
   header() {
     return this.bodies.map(b => ({ name: b.name, particles: b.n, half: b.def.half, cells: b.def.cells, ...b.params, surface: Array.from(b.lattice.surface), top_start: b.lattice.topStart, uv: Array.from(b.lattice.uv), label: b.def.label ?? null }))
   }

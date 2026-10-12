@@ -9,7 +9,6 @@ Layout after Figure's 24-hour logistics demo, in the robot frame (x forward, y l
     gap a package could fall into
   - a driven roller belt on the robot's right carrying packages away (3 cm roller pitch so a package always
     rests on at least two rollers; packages balanced on one roller seesaw and stall)
-  - one mocap proxy box per soft parcel (see the comment in the XML)
 """
 import json
 import math
@@ -120,7 +119,7 @@ for k, (hx, hy, hz) in enumerate(SIZES):
         # textures (task.geometry); it has no collision and no mass
         pkgs.append(f'''    <body name="package{n}" pos="{-3 - 0.3 * n:.1f} 0 {f(hz + 0.001)}">
       <freejoint name="package{n}_free"/>
-      <geom name="package{n}" class="object" type="box" size="{hx} {hy} {hz}" mass="0.4" condim="4" contype="5" friction="0.7 0.01 0.0005" material="cardboard"/>
+      <geom name="package{n}" class="object" type="box" size="{hx} {hy} {hz}" mass="0.4" condim="4" friction="0.7 0.01 0.0005" material="cardboard"/>
       <geom name="label{n}" class="label" size="{f(min(hx * 0.85, 0.05))} {f(min(hy * 0.85, 0.035))} 0.0002" pos="0 0 {f(hz + 0.0002)}" material="label"/>
     </body>''')
 
@@ -181,15 +180,6 @@ xml = f'''<!--
 
 ''' + "\n".join(pkgs) + '''
 
-    <!-- Soft-parcel proxies: one mocap box per bag, placed and sized by the soft solver every step to the
-         bag's current fitted box. It collides with the rigid packages only (contype bit 4), so a box resting on
-         a bag rests on MuJoCo's own contact instead of an explicit penalty; hands and fixtures never see it. -->
-    <body name="soft_proxy0" mocap="true" pos="-5 0 0.05">
-      <geom name="soft_proxy0" type="box" size="0.08 0.06 0.022" contype="0" conaffinity="4" group="3" solref="0.01 1" priority="1" friction="0.6 0.005 0.0001"/>
-    </body>
-    <body name="soft_proxy1" mocap="true" pos="-5.3 0 0.05">
-      <geom name="soft_proxy1" type="box" size="0.07 0.05 0.025" contype="0" conaffinity="4" group="3" solref="0.01 1" priority="1" friction="0.6 0.005 0.0001"/>
-    </body>
   </worldbody>
 
   <actuator>

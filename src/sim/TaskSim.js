@@ -19,7 +19,7 @@
 //   never in update(), or replay from the log would silently differ.
 //   An event's `tick` is the index of the last frame recorded before the teleport: replay applies it after
 //   comparing that frame and before stepping on to the next (see replay.js).
-//   soft?: { bodies: { [name]: { half, cells, mass?, ... } }, belts?: [geom prefixes] } declares XPBD soft
+//   soft?: { bodies: { [name]: { half, cells, mass?, label? } }, belts?: [geom prefixes] } declares XPBD soft
 //   parcels (soft.js) the task places with placeSoft/teleportSoft and reads with softPos/softUp/softSpeed;
 //   randomizeSoft?(rng) -> per-body physics; their particle positions are recorded per frame and replayed.
 //   timesteps?: the physics timesteps the task supports (the soft coupling is tuned for 0.002); the worker
@@ -56,8 +56,9 @@ export const COMMON = {
   resetHold: 0.6,
   // Episodes whose arm joints exceed this are flagged 'fast_motion' (normal teleop stays < 3 rad/s)
   fastMotion: 6,                // rad/s
-  softSpeedLimit: 3,            // m/s mean particle speed: a soft parcel moving faster than that was thrown by the solver
-  softInvertedTimeout: 1,       // s a soft parcel may stay (partly) inverted, with nothing pressing it, before the episode is flagged
+  softSpeedLimit: 4,            // m/s fastest particle: a soft parcel moving faster than that was thrown by the solver
+  softFastTimeout: 0.06,        // s (three ticks) the speed limit must be exceeded in a row to count
+  softInvertedTimeout: 1,       // s a soft parcel may stay (partly) inverted, with no hand pressing it, before the episode is flagged
 }
 
 // Start posture: hands raised near the chest, clear of the objects (grip ~(0.22, +-0.13, 1.03))
@@ -214,7 +215,7 @@ export class TaskSim {
     this.raw = new Float32Array(RAW_SIZE)
     this.autoInput = new Float32Array(INPUT_SIZE)
     // Soft parcels (XPBD, soft.js), stepped in lockstep with MuJoCo and recorded per frame
-    this.soft = task.soft ? new SoftWorld(mj, m, task.soft.bodies, { handOfBody: this.handOfBody, belts: task.soft.belts ?? [], proxies: task.soft.proxies ?? {} }) : null
+    this.soft = task.soft ? new SoftWorld(mj, m, task.soft.bodies, { handOfBody: this.handOfBody, belts: task.soft.belts ?? [] }) : null
     this.softBuf = new Float64Array(this.soft ? 3 * this.soft.total : 0)
     this.recorder = new EpisodeRecorder([
       { name: 'time', size: 1 },
@@ -276,7 +277,7 @@ export class TaskSim {
     // mj_setConst (inside setPhysics) rewrites qpos to the model default, so it must run before posing anything
     this.setPhysics(task.randomize ? task.randomize(rng) : {})
     this.softPhysics = this.soft && task.randomizeSoft ? task.randomizeSoft(rng) : {}
-    if (this.soft) { this.soft.setPhysics(this.softPhysics); this.soft.touching.fill(0) }
+    if (this.soft) this.soft.setPhysics(this.softPhysics)
     for (const arm of this.arms) {
       for (let k = 0; k < arm.qCmd.length; k++) {
         arm.qCmd[k] = arm.ready[k]
@@ -303,6 +304,7 @@ export class TaskSim {
     this.untrackedFor = 0
     this.softUnstable = false
     this.invertedFor = 0
+    this.fastFor = 0
     this.status = 'waiting' // until the operator's hands show up
     this.steps = 0
     this.startTime = 0
@@ -364,12 +366,12 @@ export class TaskSim {
 
   /** Places a soft body undeformed (reset-time; inactive = parked and not simulated). */
   placeSoft(name, pos, quat = [1, 0, 0, 0], active = false) {
-    this.soft.byName[name].place(pos, quat, active)
+    this.soft.place(name, pos, quat, active, this.d)
   }
 
   /** Teleports a soft body mid-episode and logs it so replay can re-apply it. */
   teleportSoft(name, pos, quat = [1, 0, 0, 0], active = true) {
-    this.soft.byName[name].place(pos, quat, active)
+    this.soft.place(name, pos, quat, active, this.d)
     if (this.status === 'running') this.events.push({ tick: this.frameIndex - 1, soft: name, pos: [...pos], quat: [...quat], active })
   }
 
@@ -493,16 +495,19 @@ export class TaskSim {
     return Math.max(lo, Math.min(hi, target))
   }
 
-  // A soft parcel moving faster than any hand can push it, or staying inverted for a while when nothing is
-  // pressing it (a hand crushing a bag inverts cells legitimately), is a contact the solver did not handle
-  // well: the episode is kept but flagged soft_unstable
+  // A soft parcel with a particle moving faster than a hand can push it for several ticks running (a single
+  // tick is a constraint correction after a squeeze or a teleport), or staying inverted for a while when no
+  // hand is pressing it (a hand crushing a bag inverts cells legitimately), is a contact the solver did not
+  // handle well: the episode is kept but flagged soft_unstable
   monitorSoft() {
-    let inverted = 0
+    let inverted = 0, fast = false
     for (const b of this.soft.bodies) {
       if (!b.active) continue
-      if (b.speed() > COMMON.softSpeedLimit) this.softUnstable = true
-      if (!b.pressed) inverted += b.volumeState().inverted
+      if (b.maxSpeed() > COMMON.softSpeedLimit) fast = true
+      if (!b.pressedByHand) inverted += b.volumeState().inverted
     }
+    this.fastFor = fast ? this.fastFor + this.controlDt : 0
+    if (this.fastFor >= COMMON.softFastTimeout) this.softUnstable = true
     this.invertedFor = inverted > 0 ? this.invertedFor + this.controlDt : 0
     if (this.invertedFor > COMMON.softInvertedTimeout) this.softUnstable = true
   }
@@ -609,7 +614,6 @@ export class TaskSim {
         soft_bodies: this.soft ? this.soft.header() : undefined,
         soft_solver: this.soft ? SOFT_SOLVER() : undefined,
         soft_belts: this.soft ? (task.soft.belts ?? []) : undefined,
-        soft_proxies: this.soft ? (task.soft.proxies ?? {}) : undefined,
         soft_physics: this.soft ? this.softPhysics : undefined,
         initial_soft: this.initialSoft,
         initial_soft_active: this.initialSoftActive,
